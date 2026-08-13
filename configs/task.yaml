@@ -1,7 +1,7 @@
 # Stage 0 — problem statement (one per group). Set by assignment.
-group_id: "G00"
-domain: "almanacs/panjika"
-data_speciality: "degraded-scans"   # ONE hard corpus property (English is not one)
-primary_nfr: "reproducible"
-nfr_target: "p95 latency <= 300ms"   # your concrete committed target
-corpus: {min_pages: 300, min_words: 60000, source_url: "", license: ""}
+group_id: "G05"
+domain: "ssc Humanities general knowledge"
+data_speciality: "bangla"   # ONE hard corpus property (English is not one)
+primary_nfr: "explainable"
+nfr_target: "≥95% citation completeness"   # your concrete committed target
+corpus: {min_pages: 432, min_words: 80000, source_url: "https://nctb.gov.bd/pages/static-pages/695b99afc4774958d7b70612", license: "Government copyright; free educational use. Link-only redistribution; do not redistribute the PDFs."}
