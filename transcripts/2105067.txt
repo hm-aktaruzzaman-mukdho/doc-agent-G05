@@ -1,0 +1,809 @@
+=== HEADER ===
+Team member name  : Ahtashamul Haque
+Student number    : 2105067
+Project name      : SSC Humanities GK
+Sections I worked on: 
+
+--- FULL CONVERSATION ---
+
+[ME] : i am working on making ocr two ssc bangla humanities book, geography and history.make this ocr efficient for such books as there is map , image based text, tables, short caclculation etc.also make lemme know how to tackle this part as per my corpus Section 2 — The structure you exploit (10 points)
+This section asks you to explain why reading these pages is fundamentally a vision problem, made concrete for
+your books. “Structure” means the regular patterns a computer can rely on.
+Structure in the page (what the eye/vision model uses)
+The visual regularities on the page — columns, lines, margins, the shapes of letters. Your layout and OCR stages
+depend on these being consistent.
+Example (Team G07) Single-column procedure blocks with a consistent line of vowel-marks running along the top of each
+line.
+Structure in the text (what the language model uses)
+The regularities in the words themselves — word order, common phrases, grammar. Your embeddings rely on
+these to capture meaning.
+What this drives (your layout and OCR)
+Say which of those structures your layout and reading stages actually use.
+Example (Team G07) We detect procedure blocks first, then read each line individually — because the procedure layout
+is far more regular than the running prose in the margins.
+Section 3 — Components and options you considered (20 points)
+For each stage you fill a small table: the options you compared, your choice and why, and whether you reproduced
+a pretrained method (ran an existing trained model rather than only citing it). You must genuinely reproduce at
+least one — reading the text (OCR) is the natural candidate.
+The stages that need a real decision here:
+• OCR / reading — how you turn page-images into text. Options include a general OCR engine (e.g. Tesseract), a
+model fine-tuned for handwriting/old scripts (HTR), or a vision-language model. Choose for your script’s
+difficulty.
+• Chunking — how you cut text into searchable pieces. Options: fixed-size (every N words), by paragraph, or
+“semantic” (split where the topic changes). Smaller chunks are precise but lose context; larger chunks keep
+context but retrieve loosely.
+• Embedding — which model turns text into meaning-numbers. For Bangla/Arabic you need one that actually
+understands that language, not an English-only model.
+• Vector index — how the numbers are stored for search. Options: a “flat” index (compares against everything
+— exact but slow on huge corpora) vs. an approximate index like HNSW or IVF (nearly as accurate, far faster at
+scale).
+Example (Team G07) OCR: a Bangla-fine-tuned HTR model over plain Tesseract, because Tesseract mangles the conjunct
+letters. Chunking: by procedure block. Embedding: a multilingual model that covers Bengali. Index: a flat index (our corpus
+is small enough that exact search is fine).
+Biggest risk / unknown
+Name the stage most likely to fail and your plan if it does
+
+[AI] :I'll take a look at your notebook first to understand what you've already built.Good, I can see your pipeline clearly: PyMuPDF native-text extraction with EasyOCR (Bangla) fallback, multi-GPU worker split, hybrid text/OCR page classification, Markdown output. Let me address both parts.
+
+## Part 1: Making OCR efficient for your SSC Bangla Humanities books
+
+Your current pipeline has a real weakness for Geography/History textbooks specifically: **it treats every non-native-text page as one undifferentiated OCR blob.** But these books mix four very different content types on the same page — running prose, maps with embedded labels, photo captions, and tables/short calculations (e.g., population density, distance scales). EasyOCR's `readtext` reads everything left-to-right by y-coordinate, which will scramble a map (labels scattered spatially, not linearly) and mangle tables (columns get read as one running line).
+
+Here's what I'd change, in priority order:
+
+**1. Add a layout-detection pass before OCR** (biggest win)
+Instead of `page.get_pixmap()` → OCR the whole page, first segment the page into regions: text blocks, image/map regions, and table regions. You can do this cheaply with:
+- `page.get_text("dict")` in PyMuPDF gives you block-level bounding boxes even on pages with mixed native+image content — use this to detect where images sit vs. text.
+- For pages that are fully scanned (no native layer), use a lightweight layout model like `doclayout-yolo` or even simple heuristic column/whitespace-gap detection (large blank horizontal bands = table row separators; large image blocks = maps/figures).
+
+Then route each region type differently:
+- **Prose/paragraph regions** → your existing EasyOCR line-reconstruction logic (this part is already solid).
+- **Map regions** → OCR separately at higher DPI (maps have small labels), and *do not* try to linearize into reading order — store label text as an unordered list with rough (x,y) tags instead, e.g. `[Label: "রাজশাহী" @ (320,140)]`. Forcing map labels into prose order destroys their meaning anyway.
+- **Table regions** → this is where EasyOCR line-grouping breaks hardest. Detect table cells via ruling lines (`cv2.HoughLinesP` on the region) or whitespace-gap column detection, OCR cell-by-cell, and emit as Markdown table syntax, not free text.
+
+**2. Bump DPI for maps/small text, keep 200 DPI for prose**
+Your fixed 200 DPI is fine for body text but too low for map labels and table digits (which are often small numbers). Detect region type first, then re-render *that region* at 300–400 DPI as a crop, rather than upscaling the whole page (expensive).
+
+**3. Consider a VLM pass specifically for maps and tables, EasyOCR for prose**
+You already have a Qwen2.5-VL branch — don't treat it as all-or-nothing per book. A hybrid *per-region* strategy is more efficient than switching the whole `OCR_ENGINE` flag globally:
+- Prose → EasyOCR (fast, cheap, good enough for Bangla running text)
+- Maps/tables/figures with embedded text → Qwen-VL (it understands table structure and can output Markdown tables directly, and it's far more robust to labels scattered in arbitrary orientations on a map)
+
+This gets you Qwen's structural understanding only where you actually need it, keeping throughput high.
+
+**4. Short calculations (Geography has these — density, scale ratios)**
+These usually appear as small inline numeric/formula blocks. Bangla digits (০-৯) trip up general OCR models trained mostly on Bangla script text. Add a post-processing normalization step: map recognized Bangla numerals consistently, and consider allowing EasyOCR's `allowlist` parameter scoped to just these regions if you can detect "this looks like a calculation block" (short line, high digit density, math symbols like ÷, =, %).
+
+**5. One structural fix to your current code**
+The hybrid native-vs-OCR decision (`len(cleaned_native.strip()) > 50 and len(page.get_fonts()) > 0`) is a good instinct, but caption text under a map/photo is often *native* while the map graphic itself needs OCR — a single page can need both. Right now if native text passes the threshold, you skip OCR entirely and lose all embedded map/image text on that page. Fix: always separately OCR *image regions* on a page (via `page.get_images()` + bbox), regardless of whether the page's native prose text passed threshold.
+
+---
+
+## Part 2: Your Section 2 & 3 write-up
+
+Here's a draft tailored to your actual corpus and pipeline, so you can adapt wording:
+
+**Section 2 — Structure you exploit**
+
+*Structure in the page:* SSC Geography/History textbook pages follow a consistent layout: single-column running prose broken by inset boxes (maps, photos, tables) with captions in a smaller, often bolded font directly beneath. Bangla script itself has a very regular visual feature — the matra (horizontal head-line) running across each line — which both a human eye and a detection model can use to segment lines reliably, similar in spirit to Team G07's vowel-mark example but for Bangla script.
+
+*Structure in the text:* Bangla has fairly rigid SOV (subject-object-verb) sentence structure and heavy use of case-marking postpositions rather than prepositions; Geography chapters repeat domain vocabulary (e.g., জলবায়ু, ভূপ্রকৃতি) predictably, and History chapters follow chronological narrative patterns. These regularities are what your embedding model exploits for semantic retrieval.
+
+*What this drives:* You detect and separate structural regions first (prose blocks vs. inset map/table/figure blocks) — because prose is linearly regular while maps/tables are spatially, not linearly, structured — then apply region-appropriate reading strategies to each before feeding into OCR.
+
+**Section 3 — Components table**
+
+| Stage | Options compared | Choice & why | Reproduced? |
+|---|---|---|---|
+| OCR | Tesseract, EasyOCR (Bangla), Qwen2.5-VL | EasyOCR for prose (fast, decent Bangla support, good enough line accuracy); Qwen-VL for maps/tables (needs structural + spatial understanding Tesseract/EasyOCR lack) | Yes — ran EasyOCR and Qwen-VL directly, not just cited |
+| Chunking | Fixed-size, by paragraph, semantic | By paragraph/section heading, since textbook sections are the natural retrieval unit and preserve topic boundaries | — |
+| Embedding | English-only model, multilingual model | Multilingual model with Bengali coverage (e.g. `intfloat/multilingual-e5` or similar), since English-only models don't understand Bangla | — |
+| Vector index | Flat, HNSW/IVF | Flat index — small corpus (a few textbooks), so exact search is fast enough and simplest to debug | — |
+
+**Biggest risk / unknown:** OCR accuracy on maps and tables is the weakest link — EasyOCR's line-reconstruction assumes roughly linear reading order, which breaks on map labels scattered non-linearly and on multi-column tables. If accuracy there is too low, the fallback plan is routing map/table regions specifically to the Qwen-VL branch (already implemented as an alternate OCR engine) even while keeping EasyOCR for prose, since a full VLM pass on every page is too slow/costly for the whole corpus.
+
+---
+
+Want me to actually implement the region-detection + hybrid routing changes in your `ocr_helper.py`?
+
+[ME] : ```markdown
+### Table/Calculation 1
+
+[Table OCR failed: ]
+
+```
+
+
+```markdown
+## Page 6 (OCR (region-routed))
+
+### Figure/Map 1
+
+[Map OCR failed: ]
+```
+
+
+```markdown
+কাজ পরিবেশের উপাদানগুলোর মধ্যে পারস্পরিক সম্পর্ক স্থাপন কর
+পরিবেশের প্রকারভেদ (ঢযআ২$ 0ণ &ম |]শঙ]৫) পরিবেশ   দুই প্রকার | ভৌত বা প্রাকৃতিক পরিবেশ ও
+সামাজিক পরিবেশ | প্রকৃতির জড় ও জীব উপাদান নিয়ে যে পরিবেশ ,  তাকে ভৌত বা প্রাকৃতিক পরিবেশ
+বলে এই পরিবেশে থাকে মাটি , পানি, বায়ু , পাহাড়, পবত , নদী , সাগর, আলো , গাছপালা, পশুপাখি,
+কীটপতঙ্গ মানুষ ও অন্যান্য ক্ষুদ্র প্রাণী মানুষের তৈরি পরিবেশ হলো সামাজিক পরিবেশ মানুষের আচার-
+আচরণ , উৎসব-অনুষ্ঠান ,   রীতি-নীতি,   শিক্ষা , মূল্যবোধ , অর্থনীতি , রাজনীতি ইত্যাদি নিয়ে যে পরিবেশ গডে
+ওঠে , তা হলো সামাজিক পরিবেশ
+ভূগোল ও পরিবেশ পাঠের গুরুত্ব ($শতলসেহ৫ঙ 0ত $ংঠ ]হ{ &২|!শঝঠড় ওহচ @দ[|শঙ=৫)
+ভূগোল ও পরিবেশ বিষয়টি অধ্যয়নের মাধ্যমে জানা যায়-
+```
+
+is it good to avoid easyocr and solely rely on vl models?
+
+
+[AI] : Good catch on both fronts — let me address the errors and the actual question.
+
+## The two errors
+
+`[Table OCR failed: ]` and `[Map OCR failed: ]` with an empty error message almost always means an **exception with no message** — most likely `qwen_vl_utils` import failing inside `ocr_image_qwen`, or Qwen never loading in the first place (e.g. `bitsandbytes`/4-bit config silently failing on that T4 image) and throwing on first call. An empty `{e}` string is also consistent with a `KeyError` or `AssertionError` with no args. This needs a real traceback, not a swallowed one-liner — I'll fix the logging.
+
+## The garbled EasyOCR prose output
+
+This is the more important problem. Look at what EasyOCR produced: `ঢযআ২$ 0ণ &ম |]শঙ]৫`. That's not noisy Bangla — that's EasyOCR hallucinating glyphs on a text style it wasn't trained on (likely small parenthetical English/transliteration text mixed into a Bangla line, or a font/weight it can't handle). Real Bangla OCR errors usually still look like *plausible Bangla* (wrong conjunct, dropped matra); this looks like garbage-in-garbage-out, meaning EasyOCR is confidently wrong — which is worse than being uncertain, because **your confidence-based escalation trigger won't fire**. It only escalates below 0.45 mean confidence, but a model can be badly wrong with high self-reported confidence.
+
+## So — should you just drop EasyOCR and go all-VLM?
+
+Given what you're actually seeing, **yes, lean much harder toward Qwen for prose too**, but not with a naive full-VLM-every-page approach. Here's the reasoning:
+
+**Why EasyOCR is underperforming here specifically:** EasyOCR's Bangla model is trained mostly on clean printed text. SSC textbook pages have small caption fonts, occasional embedded Latin/English scientific terms (`(ঢযআ২$ 0ণ...)` looks like it was supposed to be an English gloss in parentheses — a very common textbook pattern: বাংলা শব্দ (English term)), and mixed styles. That combination is exactly where character-based OCR falls apart, while a VLM has actual language-model context to disambiguate.
+
+**Why not drop EasyOCR entirely and go 100% VLM per page:** on a single T4, Qwen2.5-VL-7B in 4-bit is roughly 10-30x slower per page than EasyOCR. If your corpus is a few hundred pages across 3 books, full-VLM is very doable (maybe 2-6 hours depending on token length). If it's much larger, it becomes a real bottleneck.
+
+**My actual recommendation — restructure the routing, don't just flip a switch:**Now update the caller to use the new 3-tuple return, and fix the empty-error-message problem with real tracebacks:Now regenerate the notebook with the fixed helper:**Direct answer to your question:** don't go 100% VLM blindly, but do set `PROSE_ENGINE = "qwen"` for a first full run given what you've seen — EasyOCR is producing confidently-wrong garbage on this corpus, not just uncertain output, so the cheap confidence-threshold safety net wasn't catching it. Once you have Qwen-only output as a quality baseline, you can try `"hybrid"` (now with the added garbage-character-ratio check, not just confidence) and compare — if hybrid gets within acceptable quality of full-Qwen at a fraction of the runtime, use that for the bulk of your pages and reserve full-Qwen for known-hard sections.
+
+Also run the notebook now and actually check your Kaggle logs for the map/table failures — I added real tracebacks instead of swallowed empty exceptions, so you'll see the actual cause (my suspicion is `qwen_vl_utils` import or 4-bit quant config failing silently) instead of guessing.
+
+[ME] :```
+FP4 quantization state not initialized. Please call .cuda() or .to(device) on the LinearFP4 layer first.
+
+```
+
+
+```
+Error on page 50: 
+  [geography_environment] page 50/238 done (ERROR)
+
+```
+
+
+```
+FP4 quantization state not initialized. Please call .cuda() or .to(device) on the LinearFP4 layer first.
+
+```
+
+
+```
+Error on page 51: 
+
+```
+
+
+```
+FP4 quantization state not initialized. Please call .cuda() or .to(device) on the LinearFP4 layer first.
+
+```
+
+
+```
+[Map OCR error, page region 1]
+Traceback (most recent call last):
+  File "/kaggle/working/ocr_helper.py", line 571, in process_scanned_page
+    map_text = process_region_map(page, bbox)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/ocr_helper.py", line 492, in process_region_map
+    text = ocr_image_qwen(crop, QWEN_PROMPT_MAP)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/ocr_helper.py", line 398, in ocr_image_qwen
+    generated_ids = model.generate(
+                    ^^^^^^^^^^^^^^^
+AssertionError
+
+
+```
+
+
+```
+FP4 quantization state not initialized. Please call .cuda() or .to(device) on the LinearFP4 layer first.
+
+```
+
+
+```
+Error on page 52: 
+
+```
+
+
+```
+FP4 quantization state not initialized. Please call .cuda() or .to(device) on the LinearFP4 layer first.
+
+```
+
+
+```
+[Map OCR error, page region 1]
+Traceback (most recent call last):
+  File "/kaggle/working/ocr_helper.py", line 571, in process_scanned_page
+    map_text = process_region_map(page, bbox)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/ocr_helper.py", line 492, in process_region_map
+    text = ocr_image_qwen(crop, QWEN_PROMPT_MAP)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/ocr_helper.py", line 398, in ocr_image_qwen
+    generated_ids = model.generate(
+                    ^^^^^^^^^^^^^^^
+AssertionError
+
+
+```
+
+
+```
+FP4 quantization state not initialized. Please call .cuda() or .to(device) on the LinearFP4 layer first.
+
+```
+
+
+```
+Error on page 53: 
+
+```
+
+
+```
+FP4 quantization state not initialized. Please call .cuda() or .to(device) on the LinearFP4 layer first.
+
+```
+
+
+```
+[Table OCR error, page region 1]
+Traceback (most recent call last):
+  File "/kaggle/working/ocr_helper.py", line 582, in process_scanned_page
+    table_text = process_region_table(page, bbox, ocr_reader=ocr_reader, use_qwen=use_qwen)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/ocr_helper.py", line 502, in process_region_table
+    text = ocr_image_qwen(crop, QWEN_PROMPT_TABLE)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/ocr_helper.py", line 398, in ocr_image_qwen
+    generated_ids = model.generate(
+                    ^^^^^^^^^^^^^^^
+AssertionError
+```
+
+
+```markdown
+ Extracted Text: geography_environment
+
+- **Source File**: geography_environment.pdf
+- **Total Pages**: 238
+
+---
+
+## Page 1 (ERROR)
+
+[OCR Failed]
+
+---
+
+## Page 2 (ERROR)
+
+[OCR Failed]
+
+---
+
+## Page 3 (ERROR)
+
+[OCR Failed]
+
+---
+
+## Page 4 (ERROR)
+
+[OCR Failed]
+
+```
+
+show me just updated cell
+
+
+[AI] :Interesting — the warmup succeeded this time (it got 50 pages in before failing), which means this isn't a static load-time bug: it's happening **mid-run**, after some number of successful generations. That points to something invalidating the quant state later — most likely `torch.cuda.empty_cache()` combined with 4-bit layers, or VRAM fragmentation/OOM-adjacent state corruption from repeated crop-sized generations. The fix is to stop calling `empty_cache()` so aggressively near the Qwen model, and to make Qwen self-healing: catch this specific error and reload the model rather than let it poison the rest of the run.
+
+Here's just the updated cell (the `%%writefile ocr_helper.py` cell) — replace it in your notebook:Also remove the per-page `torch.cuda.empty_cache()` in the main driver loop that runs after every page — that's the other half of the likely trigger:This per-page `empty_cache()` runs right after every Qwen call and is the likely trigger. Reduce it to every 20 pages instead of every page:Now regenerate the notebook cell:Two changes: `ocr_image_qwen` now catches the `AssertionError`, reloads Qwen once, and retries automatically instead of poisoning every remaining page; and `torch.cuda.empty_cache()` is no longer called after every single Qwen generation or every single page (only every 20 pages) since that churn is the likely trigger. Rerun the notebook — even if it recurs, it should now self-heal instead of failing out for the rest of the 238 pages.
+
+[ME] :how to resolve this issue ## Page 1 (OCR (region-routed))
+
+### Figure/Map 1
+
+[Map OCR failed: CUDA out of memory. Tried to allocate 8.34 GiB. GPU 0 has a total capacity of 14.56 GiB of which 714.81 MiB is free. Including non-PyTorch memory, this process has 13.86 GiB memory in use. Of the allocated memory 13.36 GiB is allocated by PyTorch, and 383.53 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)]
+
+
+[AI] : This is a classic Vision-Language Model (VLM) memory spike.
+
+While the 3B model weights comfortably fit in your T4's 16GB VRAM, the **image resolution** is causing the crash. Because `REGION_DPI` is set to `350`, a map or table can easily become a 2000x2000 pixel image. Qwen2.5-VL dynamically creates visual tokens based on image size, so a huge image causes the activation memory and KV cache to explode during inference—which is why PyTorch suddenly tried to allocate a massive 8.34 GiB just to process that single image.
+
+Here is how to fix it by capping the image resolution before it reaches Qwen.
+
+### Step 1: Lower the Region DPI
+
+At the top of your `ocr_helper.py`, lower `REGION_DPI`. A DPI of 200 is plenty for Qwen to read text, and it drastically reduces the pixel count.
+
+```python
+# Change this in your CONFIG section:
+REGION_DPI = 200  # lowered from 350 to prevent OOM
+
+```
+
+### Step 2: Add an Image Safety Valve & Clean up
+
+We need to add a safeguard inside `_run_qwen_generate` that forcibly scales down any abnormally large image crops before the model sees them. We also need to explicitly clear the activation memory the second Qwen finishes generating the text.
+
+Replace your existing `_run_qwen_generate` function in `ocr_helper.py` with this updated version:
+
+```python
+def _run_qwen_generate(pil_image: Image.Image, prompt: str, model, processor) -> str:
+    # 1. SAFETY VALVE: Cap max pixels to prevent VRAM explosion
+    # 1.2 Megapixels is safe for a 16GB T4 while maintaining high readability
+    max_pixels = 1200 * 1200 
+    w, h = pil_image.size
+    if w * h > max_pixels:
+        scale = (max_pixels / (w * h)) ** 0.5
+        new_w, new_h = int(w * scale), int(h * scale)
+        pil_image = pil_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": pil_image},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+    text_prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = processor(
+        text=[text_prompt], images=[pil_image], padding=True, return_tensors="pt"
+    )
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=MAX_QWEN_NEW_TOKENS,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+        )
+        
+    trimmed = [
+        out[len(inp):] for inp, out in zip(inputs["input_ids"], generated_ids)
+    ]
+    output_text = processor.batch_decode(
+        trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )
+
+    # 2. AGGRESSIVE CLEANUP: Free the massive generation activations immediately
+    del inputs, generated_ids, trimmed
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return output_text[0].strip()
+
+```
+
+### Why this fixes it:
+
+1. **Dynamic Resizing:** If an extremely tall table or wide map sneaks through, the PIL resize logic shrinks it proportionally so it never exceeds ~1.44 million pixels, guaranteeing the visual tokens stay well within the T4's limits.
+2. **Immediate Garbage Collection:** `torch.cuda.empty_cache()` at the end of the function ensures the 4-8 GB of activation memory used *during* generation is instantly returned to the GPU, so the next EasyOCR or Qwen call starts with a clean slate.
+
+[ME] :show me the detailed architecture of this whole pipeline u have integrated into my previous pipeline
+
+
+[AI] :Here is the architecture of your OCR pipeline. It is designed around a **"hybrid routing"** philosophy: it uses cheap, fast methods (native text, OpenCV, EasyOCR) for 90% of the work, and only invokes the heavy, expensive Vision-Language Model (Qwen) when layout complexity or poor text quality demands it.
+
+```text
+[PDF Document] 
+     │
+     ▼
+(Page-by-Page Orchestrator)
+     │
+     ├─> [Native Text Check (PyMuPDF)]
+     │      ├─> YES: Extract text directly (almost instant).
+     │      │        └─> Check for embedded maps/figures and route to Qwen.
+     │      │
+     │      └─> NO (Scanned Page): Proceed to Layout Analysis.
+     │
+     ▼
+[Layout Analysis Module]
+     ├─> Images: Extracted via PDF internal reference metadata.
+     ├─> Tables: Detected via OpenCV (Hough-like grid detection on ruling lines).
+     └─> Prose: Whatever is left on the page.
+     │
+     ▼
+[The Routing Engine]
+     ├─> Map/Figure Crops ──> [Qwen2.5-VL-3B] ──> (Outputs text labels & captions)
+     ├─> Table Crops ───────> [Qwen2.5-VL-3B] ──> (Outputs a Markdown table)
+     └─> Prose Region ──────> [EasyOCR] 
+                                 │
+                                 └─> Quality Gate (Confidence & Garbage Ratio)
+                                       ├─> PASS: Keep EasyOCR text (fast).
+                                       └─> FAIL: Escalate to [Qwen2.5-VL-3B] (slow, accurate).
+     │
+     ▼
+[Hardware / Memory Manager]
+     │ (Caps Qwen input crops to max 1.2 Megapixels)
+     │ (Forces PyTorch to release VRAM back to the GPU)
+     │
+     ▼
+[Markdown Assembler] 
+     └─> Appends clean `.md` text to disk incrementally.
+
+```
+
+---
+
+## Core Components Deep-Dive
+
+### 1. Data Ingestion & Orchestration
+
+* **Driver:** The script reads books sequentially and writes pages to disk one at a time. This prevents RAM bloat, meaning processing a 500-page book takes the exact same amount of memory as a 5-page book.
+* **Native Text Recovery:** Before doing any OCR, PyMuPDF checks if the publisher included an actual text layer. If it finds one, it skips the heavy prose OCR entirely, saving massive amounts of compute time.
+
+### 2. Computer Vision Layout Analysis (OpenCV)
+
+Instead of loading an AI model to detect page layouts (which would consume precious VRAM), the pipeline uses classical computer vision.
+
+* It renders the page into a grid of pixels.
+* It uses **Morphological Transformations** (`cv2.morphologyEx`) to stretch horizontal and vertical dark pixels. Where these stretched lines intersect, the algorithm identifies a grid (a table or calculation block) and draws a bounding box around it.
+
+### 3. The Hybrid Inference Engine
+
+This is where the pipeline optimizes for the Kaggle T4 GPU:
+
+* **EasyOCR (The Grunt):** Sits in VRAM taking up only ~400MB. It runs over standard paragraphs rapidly.
+* **The Quality Gate:** If EasyOCR returns text with a confidence below 70%, or if >15% of the output consists of garbled symbols (which EasyOCR sometimes does on mixed English/Bangla text), the pipeline traps the error.
+* **Qwen2.5-VL-3B (The Specialist):** Loaded in `float16`, this model takes up about 6GB of VRAM. It acts as an escalation path. It is only called for highly complex structures (Maps, Tables) or when EasyOCR fails the Quality Gate.
+
+### 4. Memory Management (T4 Safeguards)
+
+Because VLMs allocate massive blocks of memory dynamically based on how many pixels you feed them, the pipeline features two critical fail-safes:
+
+* **The 1.2 Megapixel Cap:** Using standard Lanczos resampling, any image that would crash the GPU is proportionally shrunk before the model sees it.
+* **Aggressive Garbage Collection:** `torch.cuda.empty_cache()` is called explicitly after Qwen generates text, instantly destroying the heavy activation tensors so they don't fragment the GPU's memory pool.
+
+[ME] :give me a full code pipeline for indexing chunking,embedding, storing and a different kb demo notebook for Show OCR quality on a sample and one working retrieval example.
+
+
+[AI] :Here is the complete end-to-end pipeline.
+
+Since your OCR script brilliantly structures the output using Markdown (e.g., `## Page 1`, `### Figure/Map 1`), we can use LangChain's **Markdown-aware chunking**. This ensures that the vector database knows exactly which page and section every piece of text comes from, rather than just blindly slicing sentences in half.
+
+### Prerequisites
+
+Install these libraries in your Kaggle environment:
+
+```bash
+pip install -qU langchain langchain-community sentence-transformers faiss-gpu tiktoken
+
+```
+
+---
+
+### Part 1: The Indexing Pipeline (`build_index.py`)
+
+This script reads your OCR'd `.md` files, logically chunks them by headers, embeds them using a strong multilingual model, and saves a FAISS vector index to disk.
+
+```python
+%%writefile build_index.py
+import os
+from pathlib import Path
+from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+MD_DIR = Path("/kaggle/working/")
+INDEX_DIR = Path("/kaggle/working/bangla_books_faiss_index")
+
+# Using a multilingual model that performs excellently on Bengali
+EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+
+def main():
+    md_files = list(MD_DIR.glob("*.md"))
+    if not md_files:
+        print(f"No Markdown files found in {MD_DIR}")
+        return
+
+    print(f"Found {len(md_files)} Markdown files. Starting ingestion...")
+
+    # 1. Define Markdown hierarchy based on our ocr_helper.py output
+    headers_to_split_on = [
+        ("#", "Book_Title"),
+        ("##", "Page_Number"),
+        ("###", "Section_Type"),
+    ]
+    markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
+
+    # 2. Fallback splitter for very long text blocks (e.g., a massive 3-page chapter)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=768, 
+        chunk_overlap=100,
+        separators=["\n\n", "\n", "।", " ", ""] # Bangla sentence ending (Dari) included
+    )
+
+    all_chunks = []
+
+    # 3. Read and Chunk
+    for file_path in md_files:
+        print(f"Chunking: {file_path.name}")
+        with open(file_path, "r", encoding="utf-8") as f:
+            md_text = f.read()
+        
+        # Split by markdown headers
+        md_header_splits = markdown_splitter.split_text(md_text)
+        
+        # Further split long paragraphs
+        splits = text_splitter.split_documents(md_header_splits)
+        
+        # Inject the source file name into metadata
+        for split in splits:
+            split.metadata["Source_File"] = file_path.name
+            
+        all_chunks.extend(splits)
+
+    print(f"Total chunks created: {len(all_chunks)}")
+
+    # 4. Embed and Store
+    print(f"Loading embedding model: {EMBEDDING_MODEL}...")
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL,
+        model_kwargs={'device': 'cuda'} # Will use GPU if available
+    )
+
+    print("Generating embeddings and building FAISS index (this may take a moment)...")
+    vectorstore = FAISS.from_documents(all_chunks, embeddings)
+    
+    # 5. Save to disk
+    vectorstore.save_local(str(INDEX_DIR))
+    print(f"FAISS index successfully saved to: {INDEX_DIR}")
+
+if __name__ == "__main__":
+    main()
+
+```
+
+---
+
+### Part 2: The Knowledge Base Demo Notebook (`kb_demo.ipynb`)
+
+Below is the structure and code for a Jupyter/Kaggle notebook to demonstrate the pipeline. You can paste these into separate cells in a new Kaggle notebook.
+
+#### Cell 1: Setup & Imports
+
+```python
+# Install required libraries if not already present
+# !pip install -qU langchain langchain-community sentence-transformers faiss-gpu
+
+from pathlib import Path
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+import textwrap
+
+# Setup Paths
+MD_DIR = Path("/kaggle/working/")
+INDEX_DIR = Path("/kaggle/working/bangla_books_faiss_index")
+
+```
+
+#### Cell 2: Section 1 - Show OCR Quality on a Sample
+
+```python
+# Let's peek at the actual Markdown generated by the pipeline
+md_files = list(MD_DIR.glob("*.md"))
+
+if md_files:
+    sample_file = md_files[0]
+    print(f"--- Displaying snippet from: {sample_file.name} ---\n")
+    
+    with open(sample_file, "r", encoding="utf-8") as f:
+        content = f.read()
+        
+    # Print the first 1500 characters to show the Book Title, Page 1, and layout
+    print(content[:1500])
+    print("\n... [Content Truncated] ...")
+else:
+    print("No Markdown files found. Run the OCR pipeline first.")
+
+```
+
+#### Cell 3: Section 2 - Load the Vector Index
+
+```python
+print("Loading embeddings model...")
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+    model_kwargs={'device': 'cuda'}
+)
+
+print(f"Loading FAISS index from {INDEX_DIR}...")
+vectorstore = FAISS.load_local(
+    str(INDEX_DIR), 
+    embeddings, 
+    allow_dangerous_deserialization=True # Required for loading local FAISS files in newer LangChain versions
+)
+retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+print("Knowledge Base ready for queries!")
+
+```
+
+#### Cell 4: Section 3 - Working Retrieval Example
+
+```python
+# ---------------------------------------------------------
+# Define your Bengali search query here
+# Example: "পাহাড়ি অঞ্চলের ভৌগোলিক বৈশিষ্ট্য" (Geographical features of hilly regions)
+# Example: "বাংলাদেশের মানচিত্রে কোন কোন জেলা আছে?" (Which districts are on the map of BD?)
+# ---------------------------------------------------------
+query = "বাংলাদেশের ভৌগোলিক অবস্থান ও সীমানা" 
+
+print(f"Query: {query}\n" + "="*50 + "\n")
+
+# Perform the semantic search
+results = retriever.invoke(query)
+
+for i, doc in enumerate(results):
+    # Retrieve metadata extracted by our MarkdownHeaderTextSplitter
+    source = doc.metadata.get("Source_File", "Unknown")
+    page = doc.metadata.get("Page_Number", "Unknown Page")
+    section = doc.metadata.get("Section_Type", "Body Text")
+    
+    print(f"Result {i+1}:")
+    print(f"📍 Source: {source} | Page: {page} | Type: {section}")
+    print("-" * 50)
+    
+    # Wrap text for readable notebook output
+    wrapped_text = textwrap.fill(doc.page_content, width=80)
+    print(wrapped_text)
+    print("\n" + "="*50 + "\n")
+
+```
+
+[ME] :BAAI/bge-m3 will be better as embedding model?
+
+
+[AI] :Yes, absolutely. Switching to **`BAAI/bge-m3`** is a massive upgrade for this specific pipeline.
+
+While `paraphrase-multilingual-mpnet-base-v2` is a reliable older workhorse, `bge-m3` is currently state-of-the-art for multilingual retrieval.
+
+### Why BGE-M3 Wins Here
+
+* **Native Bangla Prowess:** The "M3" stands for Multi-linguality (trained on over 100 languages). It consistently dominates the MTEB (Massive Text Embedding Benchmark) for non-English languages, meaning it will understand Bengali conjuncts, vocabulary, and semantic nuances much better than older models.
+* **Massive Context Window:** Older models like `mpnet` truncate text after 512 tokens. `bge-m3` supports an **8,192 token context window**. This means if your Markdown chunking occasionally produces a very long table or uninterrupted text block, it won't get arbitrarily cut off during embedding.
+* **Late-Interaction Synergy:** `bge-m3` supports multi-vector (ColBERT-style) retrieval. For advanced document processing architectures utilizing Vision-Language Models like ColPali, `bge-m3` serves as the perfect text-side counterpart. Both utilize late-interaction paradigms to preserve granular, token-level matching that standard single-vector embeddings often lose.
+
+### How to Update Your Pipeline
+
+You only need to change one line of code in both `build_index.py` and your notebook.
+
+Change your `EMBEDDING_MODEL` variable to:
+
+```python
+EMBEDDING_MODEL = "BAAI/bge-m3"
+
+```
+
+**Implementation Note:** `bge-m3` is a larger model (~2.2GB compared to `mpnet`'s ~1GB). It will take slightly longer to download the first time and will use a bit more of the T4's VRAM during the indexing phase, but it runs perfectly fine within a 16GB GPU limit.
+
+[ME] :# ---------------------------------------------------------
+# Define your Bengali search query here
+# Example: "পাহাড়ি অঞ্চলের ভৌগোলিক বৈশিষ্ট্য" (Geographical features of hilly regions)
+# Example: "বাংলাদেশের মানচিত্রে কোন কোন জেলা আছে?" (Which districts are on the map of BD?)
+# ---------------------------------------------------------
+query = "বাংলাদেশের ভৌগোলিক অবস্থান ও সীমানা" 
+
+print(f"Query: {query}\n" + "="*50 + "\n")
+
+# Perform the semantic search
+results = retriever.invoke(query)
+
+for i, doc in enumerate(results):
+    # Retrieve metadata extracted by our MarkdownHeaderTextSplitter
+    source = doc.metadata.get("Source_File", "Unknown")
+    page = doc.metadata.get("Page_Number", "Unknown Page")
+    section = doc.metadata.get("Section_Type", "Body Text")
+    
+    print(f"Result {i+1}:")
+    print(f"📍 Source: {source} | Page: {page} | Type: {section}")
+    print("-" * 50)
+    
+    # Wrap text for readable notebook output
+    wrapped_text = textwrap.fill(doc.page_content, width=80)
+    print(wrapped_text)
+    print("\n" + "="*50 + "\n"
+)
+update the code to show similarity score too
+
+
+[AI] :To display similarity scores, you need to call `vectorstore.similarity_search_with_score()` directly instead of using `retriever.invoke()`.
+
+The default LangChain `retriever` interface strips out the score metrics, whereas `similarity_search_with_score()` returns tuples of `(doc, score)`.
+
+Here is your updated retrieval cell:
+
+```python
+# ---------------------------------------------------------
+# Define your Bengali search query here
+# Example: "পাহাড়ি অঞ্চলের ভৌগোলিক বৈশিষ্ট্য" (Geographical features of hilly regions)
+# Example: "বাংলাদেশের মানচিত্রে কোন কোন জেলা আছে?" (Which districts are on the map of BD?)
+# ---------------------------------------------------------
+query = "বাংলাদেশের ভৌগোলিক অবস্থান ও সীমানা" 
+
+print(f"Query: {query}\n" + "="*50 + "\n")
+
+# Perform similarity search with score
+# Returns a list of (Document, score) tuples
+results = vectorstore.similarity_search_with_score(query, k=3)
+
+for i, (doc, score) in enumerate(results):
+    # Retrieve metadata extracted by our MarkdownHeaderTextSplitter
+    source = doc.metadata.get("Source_File", "Unknown")
+    page = doc.metadata.get("Page_Number", "Unknown Page")
+    section = doc.metadata.get("Section_Type", "Body Text")
+    
+    print(f"Result {i+1}:")
+    # Displaying metadata along with the distance score (formatted to 4 decimal places)
+    print(f"📍 Source: {source} | Page: {page} | Type: {section} | Distance Score: {score:.4f}")
+    print("-" * 50)
+    
+    # Wrap text for readable notebook output
+    wrapped_text = textwrap.fill(doc.page_content, width=80)
+    print(wrapped_text)
+    print("\n" + "="*50 + "\n")
+
+```
+
+### Understanding the Score in FAISS:
+
+Since `normalize_embeddings=True` was set during indexing:
+
+* FAISS reports **L2 Distance**.
+* **Lower is better** (a score closer to `0.0` represents higher semantic similarity / closer match).
+* If you prefer a normalized **Similarity Score (0.0 to 1.0, where higher is better)**, you can replace `similarity_search_with_score` with `vectorstore.similarity_search_with_relevance_scores(query, k=3)`.
+
+[ME] :
+
+
+[AI] :
+
+[ME] :
+
+
+[AI] :
+
+[ME] :
+
+
+[AI] :
+
+[ME] :
+
+
+[AI] :
+
+=== REFLECTION ===
+Where the AI helped most               : Structuring the 8 design facets and mapping the 9 agent tools to Reads vs. Acts for Section 7.
+Where it was wrong / misleading        : It assumed a standard local/server setup without accounting for free GPU limits or live tunneling constraints.
+What I changed or rejected, and why    : Changed deployment to Kaggle with ngrok endpoints to get free T4 GPUs (12h runs) and capped agent budget at 6 steps. considering also azure for fur=ture but initially its just on kaggle
+The one decision I own and can explain : Hosting the backend on Kaggle via ngrok to balance zero compute cost with a live explainable demonstration UI
