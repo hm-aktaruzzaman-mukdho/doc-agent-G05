@@ -206,13 +206,13 @@ def transcribe(regions: list[Region], cfg: dict) -> list[Chunk]:
     """Convert OCR output or detected regions into page-citable text chunks."""
     ocr_cfg = cfg["ocr"]
     if ocr_cfg.get("use_precomputed", False):
-        chunks = _precomputed_chunks(cfg)
+        precomputed_chunks = _precomputed_chunks(cfg)
         if not regions:
-            return chunks
+            return precomputed_chunks
 
         requested_pages = {region.page_id for region in regions}
-        selected = [chunk for chunk in chunks if set(chunk.page_ids) & requested_pages]
-        return selected or chunks
+        selected = [chunk for chunk in precomputed_chunks if set(chunk.page_ids) & requested_pages]
+        return selected or precomputed_chunks
 
     reader = Reader(cfg)
     ordered_regions = sorted(

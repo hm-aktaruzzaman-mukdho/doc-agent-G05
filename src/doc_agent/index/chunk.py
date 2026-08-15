@@ -1,11 +1,15 @@
 """Stage 4 — chunk text"""
+
 from __future__ import annotations
+
 from chonkie import TokenChunker
-from ..contracts import *  # noqa
+
+from ..contracts import Chunk
+
 
 def split(chunks: list[Chunk], cfg: dict) -> list[Chunk]:
     """Split every OCR page independently, retaining its page provenance."""
-    
+
     if not chunks:
         return []
 
@@ -39,4 +43,3 @@ def split(chunks: list[Chunk], cfg: dict) -> list[Chunk]:
                 )
             )
     return output
-

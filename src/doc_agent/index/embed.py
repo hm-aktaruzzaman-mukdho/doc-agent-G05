@@ -1,7 +1,10 @@
 """Stage 4 — embed chunks"""
+
 from __future__ import annotations
+
 import numpy as np
 import torch
+
 from ..contracts import Chunk
 
 
