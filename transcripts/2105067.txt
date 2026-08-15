@@ -2792,14 +2792,7 @@ else:
     plt.show()
 
 ```
-[ME]:
-[AI]:
-[ME]:
-[AI]:
-[ME]:
-[AI]:
-[ME]:
-[AI]:
+
 [ME]:based on the files complete the the test ingestion
 """Unit test home for ingest. IMPLEMENT — CI runs these."""
 

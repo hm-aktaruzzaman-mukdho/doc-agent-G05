@@ -4,4 +4,4 @@ domain: "ssc Humanities general knowledge"
 data_speciality: "bangla"   # ONE hard corpus property (English is not one)
 primary_nfr: "explainable"
 nfr_target: "≥95% citation completeness"   # your concrete committed target
-corpus: {min_pages: 432, min_words: 80000, source_url: "https://nctb.gov.bd/pages/static-pages/695b99afc4774958d7b70612", license: "Government copyright; free educational use. Link-only redistribution; do not redistribute the PDFs."}
+corpus: {min_pages: 432, min_words: 137967, source_url: "https://nctb.gov.bd/pages/static-pages/695b99afc4774958d7b70612", license: "Government copyright; free educational use. Link-only redistribution; do not redistribute the PDFs."}
