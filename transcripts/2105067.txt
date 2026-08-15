@@ -2408,8 +2408,374 @@ def run(pages: list[Page], cfg: dict) -> list[Page]:
 [AI]:
 [ME]:
 [AI]:
-[ME]:
-[AI]:
+[ME]:the md file is the generated ocr from my pipeline and the jsnol file from gemini taking as ground truth. now give me a pyhton code for  OCR accuracy on the most faded pages — if it’s too low, we fall back to flagging those pages for
+manual transcription.
+Section 4 — The knowledge base you built (20 points)
+Show that the knowledge base actually exists and that your model and settings are justified — not just described.
+The pipeline, in one honest paragraph
+Describe what actually runs end-to-end, naming the models and the key settings you chose.
+Index statistics
+The concrete numbers proving the index is real: how many chunks, the size of each meaning-number list
+(“embedding dimension”), and the index type and size.
+Example (Team G07) 6,100 chunks · 768 numbers per chunk · stored in a FAISS flat index (~40 MB).
+What should NOT change
+Name the fixed “contracts” — the agreed shapes of data passing between stages — that later stages depend on, so
+you don’t accidentally break A3.
+Section 5 — Evidence it works (25 points — the biggest block)
+This is the largest single block, and the automatic grader re-measures these itself against a hidden set of correctly-
+transcribed pages. So report real numbers — inflated claims are caught.
+OCR quality on a sample
+Measure how accurately you read text on a labelled sample — a set of pages where the correct text is known.
+Report a standard accuracy number (character or word error rate, or F1) and the sample size.
+Example (Team G07) Character-level F1 of 0.88 on 40 held-out pages (F1 balances how much you got right against how
+much you added or missed).
+One retrieval example that worked
+Show one real question, the page your search returned, and confirm it’s the right page.
+Example (Team G07) “Which procedure discusses pesticide dosing?” → the search returned page 212, which is correct.
+The worst failure you saw
+Show one honest case where reading or retrieval failed badly, and your read on why. Naming failures earns marks;
+hiding them loses them.
+Watch out: If you claim OCR or retrieval numbers far above what the grader measures on your own files, that gap is
+flagged as possible result-fabrication.
+[AI]:Let me test it against your two files before handing it off.Right — literal control characters (raw newlines) inside JSON strings are strictly invalid, so I need `strict=False` on the decoder to allow them.Working correctly. Copying the final script to outputs.Ran it against your two files as a test:
+
+```
+Page  Hyp chars  Ref chars   CER   Precision  Recall   F1
+  42       2603       2592  0.054     0.964    0.968  0.966
+  51       2131       2136  0.015     0.990    0.988  0.989
+  16       2519       2521  0.017     0.990    0.989  0.989
+
+Mean CER: 0.028   Mean character-F1: 0.982
+```
+
+A few things worth knowing:
+
+- **Alignment issue in your data:** `labels.jsonl` isn't strict JSONL — several `"text"` fields contain literal raw newlines instead of escaped `\n`. Standard line-by-line JSON parsing chokes on this. The script works around it with `json.JSONDecoder(strict=False)` scanning the whole file for consecutive objects instead of assuming one-record-per-line.
+- **Page mapping:** your `.md` file has generic `## Page 1/2/3` headings (no real page numbers), so I aligned them positionally with the 3 records in `labels.jsonl` in file order (page 16 → block 1, page 42 → block 2, page 51 → block 3). If you batch multiple faded-page files this way, make sure the md blocks and jsonl records stay in the same order, or I can add page-number detection from the md content instead (e.g. matching " | ৩৭" style running headers) if that's more reliable.
+- **Threshold:** defaults to F1 < 0.80 for the manual-transcription flag; pass `--threshold` to match whatever cutoff you decide to defend in the report.
+- **Usage for your actual "most faded pages" set:**
+```bash
+python ocr_accuracy.py --ocr <your_combined_faded_pages.md> --labels labels.jsonl --faded-pages 16 51 88 ...
+```
+
+On this 3-page sample, everything clears even a 0.90 threshold — so if your real faded-page batch is meaningfully worse, that gap itself is useful evidence for the "worst failure you saw" writeup in Section 5. One caveat since these are OCR outputs: I can't independently verify the ground-truth JSONL is fully clean — worth spot-checking a page or two by eye before quoting the numbers in your report.
+#!/usr/bin/env python3
+"""
+ocr_accuracy.py
+================
+Measures OCR quality of your pipeline's Markdown output against Gemini
+ground-truth labels (labels.jsonl), on a per-page basis, and flags any
+page whose accuracy falls below a threshold for manual transcription.
+
+This is written specifically for the "most faded pages" evaluation in
+Section 5 of the report: you run it against the subset of pages you've
+identified as visually degraded, and it tells you (a) the real CER/F1
+on that subset and (b) which individual pages are bad enough that OCR
+should not be trusted for them.
+
+Usage
+-----
+    python ocr_accuracy.py \
+        --ocr page_016_dual_gpu.md \
+        --labels labels.jsonl \
+        --threshold 0.80 \
+        --faded-pages 16 51          # optional: restrict to known-faded pages
+
+If --faded-pages is omitted, all pages found in the OCR file are scored,
+and any page below --threshold is flagged.
+
+Only the standard library is used (difflib for alignment), so there is
+no dependency on jiwer/editdistance/etc.
+
+Metrics reported per page
+--------------------------
+  - CER   : character error rate = edit_distance(hyp, ref) / len(ref)
+  - Char-F1 : precision/recall/F1 over matched character spans found by
+              difflib's SequenceMatcher (a common CER-free way to report
+              "how much you got right vs. added/missed", matching the
+              rubric's example metric).
+
+Both are computed on NFC-normalized, whitespace-collapsed text, ignoring
+markdown scaffolding (headings, horizontal rules, image placeholders)
+that the ground truth never contains, so those don't inflate the error
+rate for reasons that have nothing to do with recognition quality.
+"""
+
+import argparse
+import json
+import re
+import sys
+import unicodedata
+from dataclasses import dataclass, field
+from difflib import SequenceMatcher
+from pathlib import Path
+
+
+# --------------------------------------------------------------------------
+# Text extraction from the OCR markdown
+# --------------------------------------------------------------------------
+
+PAGE_HEADING_RE = re.compile(r"^##\s+Page\s+(\d+)\s*$", re.MULTILINE)
+
+
+def split_markdown_into_pages(md_text: str) -> list[str]:
+    """Split a multi-page OCR markdown file into raw per-page text blocks,
+    in the order they appear (## Page 1, ## Page 2, ...)."""
+    matches = list(PAGE_HEADING_RE.finditer(md_text))
+    if not matches:
+        # Single-page file with no "## Page N" headings at all.
+        return [md_text]
+
+    blocks = []
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(md_text)
+        blocks.append(md_text[start:end])
+    return blocks
+
+
+def clean_ocr_block(block: str) -> str:
+    """Strip markdown scaffolding that the ground truth won't contain:
+    horizontal rules, image placeholders, and heading markers (but keep
+    the heading TEXT, since that's real page content in these textbooks)."""
+    text = block
+
+    # Drop horizontal rules ("---") used as page/section separators.
+    text = re.sub(r"^\s*-{3,}\s*$", "", text, flags=re.MULTILINE)
+
+    # Drop markdown image lines: ![alt](url)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+
+    # Strip leading '#' heading markers but keep the heading text itself,
+    # e.g. "### নির্বাচনের গুরুত্ব" -> "নির্বাচনের গুরুত্ব"
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+
+    # Strip bold/italic markers.
+    text = text.replace("**", "").replace("__", "")
+
+    return text
+
+
+def normalize(text: str) -> str:
+    """Normalize Unicode form and whitespace so that visually-identical
+    text isn't penalized for encoding differences (this matters a lot
+    for Bangla, where the same glyph can have multiple codepoint forms)."""
+    text = unicodedata.normalize("NFC", text)
+    # Collapse all whitespace (including newlines) to single spaces so
+    # that layout/line-wrapping differences between the OCR pipeline and
+    # Gemini's output don't count as errors.
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+# --------------------------------------------------------------------------
+# Metrics
+# --------------------------------------------------------------------------
+
+def levenshtein(a: str, b: str) -> int:
+    """Standard O(len(a)*len(b)) edit distance, iterative DP with a
+    rolling row (keeps memory O(min(len(a), len(b))))."""
+    if len(a) < len(b):
+        a, b = b, a
+    if not b:
+        return len(a)
+
+    previous_row = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        current_row = [i] + [0] * len(b)
+        for j, cb in enumerate(b, start=1):
+            insert_cost = current_row[j - 1] + 1
+            delete_cost = previous_row[j] + 1
+            replace_cost = previous_row[j - 1] + (ca != cb)
+            current_row[j] = min(insert_cost, delete_cost, replace_cost)
+        previous_row = current_row
+    return previous_row[-1]
+
+
+def char_error_rate(hyp: str, ref: str) -> float:
+    if len(ref) == 0:
+        return 0.0 if len(hyp) == 0 else 1.0
+    return levenshtein(hyp, ref) / len(ref)
+
+
+def char_f1(hyp: str, ref: str) -> tuple[float, float, float]:
+    """Character-level precision/recall/F1 using the length of matching
+    blocks found by SequenceMatcher as "characters correctly read".
+
+        precision = matched_chars / len(hyp)   -> how much of what you
+                                                   produced was right
+        recall    = matched_chars / len(ref)   -> how much of the true
+                                                   text you captured
+        F1        = harmonic mean of the two
+    """
+    if not hyp and not ref:
+        return 1.0, 1.0, 1.0
+    if not hyp or not ref:
+        return 0.0, 0.0, 0.0
+
+    matcher = SequenceMatcher(None, hyp, ref, autojunk=False)
+    matched_chars = sum(block.size for block in matcher.get_matching_blocks())
+
+    precision = matched_chars / len(hyp)
+    recall = matched_chars / len(ref)
+    f1 = 0.0 if (precision + recall) == 0 else 2 * precision * recall / (precision + recall)
+    return precision, recall, f1
+
+
+# --------------------------------------------------------------------------
+# Data loading
+# --------------------------------------------------------------------------
+
+@dataclass
+class PageResult:
+    page_number: int
+    hyp_chars: int
+    ref_chars: int
+    cer: float
+    precision: float
+    recall: float
+    f1: float
+    flagged: bool = False
+
+
+def load_ground_truth(labels_path: Path) -> list[dict]:
+    """Parse labels.jsonl.
+
+    Note: this file is *not* strictly one-JSON-object-per-line — several
+    of its "text" fields contain literal (unescaped) newlines rather than
+    "\\n" escapes, which breaks naive line-by-line json.loads(). Instead,
+    we scan the whole file with json.JSONDecoder.raw_decode(), which
+    finds one JSON object at a time regardless of embedded newlines and
+    skips the whitespace between records.
+    """
+    text = labels_path.read_text(encoding="utf-8")
+    # strict=False permits literal control characters (raw newlines) inside
+    # JSON string values, which is what this particular file contains.
+    decoder = json.JSONDecoder(strict=False)
+    records = []
+    idx = 0
+    length = len(text)
+    while idx < length:
+        # Skip whitespace (including newlines) between records.
+        while idx < length and text[idx].isspace():
+            idx += 1
+        if idx >= length:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"labels.jsonl: could not parse JSON object starting at char {idx}: {e}")
+        records.append(obj)
+        idx = end
+    return records
+
+
+def load_ocr_pages(ocr_path: Path) -> list[str]:
+    md_text = ocr_path.read_text(encoding="utf-8")
+    raw_blocks = split_markdown_into_pages(md_text)
+    return [clean_ocr_block(b) for b in raw_blocks]
+
+
+# --------------------------------------------------------------------------
+# Main evaluation
+# --------------------------------------------------------------------------
+
+def evaluate(ocr_path: Path, labels_path: Path, faded_pages: set[int] | None,
+             threshold: float) -> list[PageResult]:
+    ocr_pages = load_ocr_pages(ocr_path)
+    gt_records = load_ground_truth(labels_path)
+
+    if len(ocr_pages) != len(gt_records):
+        print(
+            f"WARNING: OCR file has {len(ocr_pages)} page block(s) but "
+            f"labels.jsonl has {len(gt_records)} record(s). Aligning by "
+            f"position, in order — verify this is correct for your file.",
+            file=sys.stderr,
+        )
+
+    results = []
+    for hyp_block, gt in zip(ocr_pages, gt_records):
+        page_number = gt.get("page_number")
+
+        if faded_pages is not None and page_number not in faded_pages:
+            continue
+
+        hyp = normalize(hyp_block)
+        ref = normalize(gt["text"])
+
+        cer = char_error_rate(hyp, ref)
+        precision, recall, f1 = char_f1(hyp, ref)
+
+        results.append(
+            PageResult(
+                page_number=page_number,
+                hyp_chars=len(hyp),
+                ref_chars=len(ref),
+                cer=cer,
+                precision=precision,
+                recall=recall,
+                f1=f1,
+                flagged=f1 < threshold,
+            )
+        )
+
+    return results
+
+
+def print_report(results: list[PageResult], threshold: float) -> None:
+    if not results:
+        print("No matching pages found between OCR output and labels.jsonl.")
+        return
+
+    results_sorted = sorted(results, key=lambda r: r.f1)
+
+    print(f"{'Page':>6} {'Hyp chars':>10} {'Ref chars':>10} {'CER':>8} "
+          f"{'Precision':>10} {'Recall':>8} {'F1':>8}  Flag")
+    print("-" * 78)
+    for r in results_sorted:
+        flag = "MANUAL REVIEW" if r.flagged else ""
+        print(f"{r.page_number:>6} {r.hyp_chars:>10} {r.ref_chars:>10} "
+              f"{r.cer:>8.3f} {r.precision:>10.3f} {r.recall:>8.3f} {r.f1:>8.3f}  {flag}")
+
+    n = len(results)
+    mean_cer = sum(r.cer for r in results) / n
+    mean_f1 = sum(r.f1 for r in results) / n
+    flagged = [r for r in results_sorted if r.flagged]
+
+    print("-" * 78)
+    print(f"Sample size: {n} page(s)")
+    print(f"Mean CER: {mean_cer:.3f}   Mean character-F1: {mean_f1:.3f}   "
+          f"(threshold for manual fallback: F1 < {threshold:.2f})")
+
+    if flagged:
+        pages = ", ".join(str(r.page_number) for r in flagged)
+        print(f"\n{len(flagged)} page(s) fall below the accuracy threshold "
+              f"and should be flagged for MANUAL TRANSCRIPTION: {pages}")
+    else:
+        print("\nAll evaluated pages meet the accuracy threshold — "
+              "no manual transcription fallback needed for this sample.")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--ocr", required=True, type=Path, help="Path to the OCR pipeline's markdown output (e.g. page_016_dual_gpu.md)")
+    parser.add_argument("--labels", required=True, type=Path, help="Path to labels.jsonl (Gemini ground truth)")
+    parser.add_argument("--threshold", type=float, default=0.80, help="Char-F1 threshold below which a page is flagged for manual transcription (default: 0.80)")
+    parser.add_argument("--faded-pages", type=int, nargs="*", default=None, help="Page numbers to restrict evaluation to (your known-faded subset). If omitted, evaluates every page present in both files.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    faded = set(args.faded_pages) if args.faded_pages else None
+
+    results = evaluate(args.ocr, args.labels, faded, args.threshold)
+    print_report(results, args.threshold)
+
+
+if __name__ == "__main__":
+    main()
+    
 
 === REFLECTION ===
 Where the AI helped most               : Structuring the 8 design facets and mapping the 9 agent tools to Reads vs. Acts for Section 7.
