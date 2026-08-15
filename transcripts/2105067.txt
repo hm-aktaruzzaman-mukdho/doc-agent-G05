@@ -5,8 +5,1172 @@ Project name      : SSC Humanities GK
 Sections I worked on: 
 
 --- FULL CONVERSATION ---
+[ME]:show me some SOTA methods for ingestions and ehancement,layout,ocr and indexing design coices on rag based ssc humaities books GK preparation
+[AI]:Building a RAG (Retrieval-Augmented Generation) pipeline for SSC Humanities and General Knowledge (GK) preparation presents unique challenges. These textbooks are dense with historical timelines, geographical maps, multi-column layouts, and tabular demographic data, often requiring a bilingual (Bangla and English) approach.
 
-[ME] : i am working on making ocr two ssc bangla humanities book, geography and history.make this ocr efficient for such books as there is map , image based text, tables, short caclculation etc.also make lemme know how to tackle this part as per my corpus Section 2 — The structure you exploit (10 points)
+Here are the state-of-the-art (SOTA) methods for each stage of the pipeline to handle this specific domain.
+
+---
+
+## 1. Ingestion & Enhancement
+
+Scanned SSC textbooks often suffer from bleed-through, skewed pages, and low resolution. If the visual quality is poor, downstream layout parsing will fail.
+
+* **Dewarping & Deskewing:** Use models like **DocEnTr** or traditional OpenCV pipelines to flatten curved pages (common in thick textbook scans) and align text horizontally.
+* **Binarization:** Adaptive thresholding (like Sauvola's method) removes background noise, page discoloration, and text bleed-through from the reverse side of the page.
+* **Super Resolution:** For low-DPI historical maps or diagrams, applying models like **Real-ESRGAN** prior to OCR ensures small text inside figures is readable.
+
+## 2. Layout Analysis & OCR
+
+Humanities books do not read linearly. You must detect reading order across sidebars, image captions, and tables.
+
+### Layout Parsing
+
+* **Surya / Marker:** Vik Paruchuri's **Surya** is currently SOTA for line-level layout analysis, reading order detection, and table boundaries. **Marker** wraps this into a pipeline that converts PDFs directly to Markdown, preserving the document's structure.
+* **LayoutLMv3:** A multimodal transformer that combines text, layout, and image features to classify document blocks (Title, Text, Table, Figure).
+
+### Bilingual OCR (Bangla/English)
+
+* **Google Cloud Vision API:** Still the gold standard for Bangla OCR, handling complex ligatures (যুক্তবর্ণ) exceptionally well.
+* **PaddleOCR (v4):** The best open-source alternative for multilingual OCR, highly customizable for mixed Bangla-English textbook pages.
+* **VLM Parsing:** For pages with extreme complexity (e.g., a map of the 1971 sectors with overlapping text), passing the cropped layout block directly to a Vision-Language Model (like Gemini 1.5 Pro or Qwen-VL-Max) to generate a Markdown description often outperforms traditional OCR.
+
+## 3. Chunking Strategies for GK
+
+General Knowledge requires high factual precision. Traditional fixed-size token chunking will split critical dates and events, leading to retrieval failures.
+
+| Strategy | How It Works | Why it fits Humanities & GK |
+| --- | --- | --- |
+| **Structural Chunking** | Splitting text based on Markdown headers (`## Chapter`, `### Sub-topic`) using tools like LangChain's `MarkdownHeaderTextSplitter`. | Keeps context intact. An entire section on "The Pal Dynasty" stays together, preventing orphan facts. |
+| **Propositional Indexing** | Using a lightweight LLM to break complex paragraphs into atomic, self-contained facts (e.g., *"The Battle of Buxar occurred in 1764."*). | SOTA for GK. Ensures dense retrieval vectors are highly concentrated on specific facts rather than diluted by paragraph filler. |
+| **Table Serialization** | Converting tables into HTML or Markdown, or generating QA pairs for each row. | Allows the retriever to understand relationships (e.g., matching a river to its length in a geography table). |
+
+## 4. Indexing & Retrieval Design Choices
+
+### Hybrid Search (Dense + Lexical)
+
+Relying solely on vector embeddings is a mistake for GK. Dense vectors (like **BGE-M3** or **mE5**) are great for semantic matching ("ancient wars in Bengal"), but they struggle with exact entity searches. You must use **Hybrid Search**: combining Vector Search with **BM25** (lexical search) to catch exact dates, specific names, and locations.
+
+### Parent-Child (Multi-Vector) Retrieval
+
+Index small, highly specific chunks (or propositions) in the vector database to ensure accurate search hits. However, when a chunk is retrieved, pass its larger surrounding "parent" section to the LLM. This guarantees the LLM has the full historical or geographical context needed to formulate a comprehensive answer.
+
+### Vision-Language RAG (The ColPali Approach)
+
+Instead of fighting the friction of OCR, layout parsing, and table extraction, SOTA architectures are moving toward **Visual RAG**:
+
+1. Treat every textbook page as an image.
+2. Use a vision-language encoder like **ColPali** (based on PaliGemma) to generate rich embeddings of the *raw page image*.
+3. Store these image embeddings in a vector database (like Vespa or Qdrant).
+4. When a user asks a question, retrieve the most relevant page images and pass them directly to a Multimodal LLM to generate the answer.
+
+This approach completely sidesteps OCR errors and perfectly preserves the spatial layout of maps, historical timelines, and demographic tables.
+[ME]:show me the pros and cons of using Deterministic OpenCV deskew, non-local-means denoise and adaptive binarization and temp imges on ingestion and enhancement
+[AI]:Using deterministic OpenCV operations (like Hough-transform deskew, non-local means denoising, and adaptive binarization) chained together via temporary image files is the classic, battle-tested approach to document preprocessing.
+
+Compared to modern Deep Learning/AI approaches, this traditional computer vision pipeline offers extreme predictability but lacks semantic understanding.
+
+Here is the breakdown of the pros and cons of this specific architectural design for textbook ingestion.
+
+## Executive Summary
+
+| Feature | The Pros (Why it works) | The Cons (Where it breaks) |
+| --- | --- | --- |
+| **Deterministic Deskew** | Fast, explainable, and CPU-friendly. | Only fixes 2D rotation; fails on 3D page curls. |
+| **NLM Denoising** | Preserves text edges brilliantly while removing background grain. | Computationally heavy; extremely slow on high-res scans. |
+| **Adaptive Binarization** | The ultimate fix for uneven lighting and spine shadows. | Hyperparameter brittle; can erode delicate Bangla ligatures. |
+| **Temp Images (Disk I/O)** | Excellent for debugging and checkpointing long jobs. | Massive I/O bottleneck; drastically slows down ingestion. |
+
+---
+
+## 1. Deterministic Deskew (minAreaRect / Hough Lines)
+
+This typically involves finding the contours of text blocks, calculating their angle, and applying an affine rotation matrix (`cv2.warpAffine`) to straighten the page.
+
+* **Pros:**
+* **Highly Efficient:** It runs strictly on the CPU and requires very little memory.
+* **Explainable:** You can visualize the exact lines or bounding boxes the algorithm used to calculate the angle. If it fails, you know why.
+
+
+* **Cons:**
+* **No 3D Dewarping:** A deterministic 2D rotation matrix cannot fix the curved distortion that happens near the spine of a thick textbook. It will straighten the center but leave the edges warped.
+* **Vulnerable to Layouts:** If a page contains a lot of vertical tables, diagonal diagrams, or marginalia, the algorithm might align to the wrong dominant angle.
+
+
+
+## 2. Non-Local Means (NLM) Denoising
+
+Algorithms like `cv2.fastNlMeansDenoising()` work by taking a small patch of pixels and searching the image for similar patches, averaging them out to remove noise while keeping sharp edges.
+
+* **Pros:**
+* **Edge Preservation:** Unlike standard Gaussian blurs that make text fuzzy (ruining OCR), NLM removes background grain and scanner artifacts while keeping the sharp edges of text intact.
+
+
+* **Cons:**
+* **Severe Speed Bottleneck:** NLM is incredibly computationally expensive. Running it on a standard 300 DPI textbook scan (typically 8+ megapixels) can take several seconds per page on a CPU. Multiplied by a 500-page textbook, this single step creates a massive ingestion bottleneck.
+
+
+
+## 3. Adaptive Binarization
+
+Instead of using one global threshold for the whole image, `cv2.adaptiveThreshold()` calculates the threshold for small pixel neighborhoods (e.g., an 11x11 grid).
+
+* **Pros:**
+* **Conquers Uneven Illumination:** SSC textbooks often have a dark gradient near the spine and bright glares on the edges. Global thresholding turns the shadow into a giant black block. Adaptive binarization successfully extracts text regardless of local lighting.
+
+
+* **Cons:**
+* **Hyperparameter Brittleness:** The `blockSize` and `C` (constant to subtract) parameters are hardcoded. A block size that works perfectly for a 300 DPI scan will completely obliterate the text on a 150 DPI scan.
+* **Ligature Damage:** If tuned too aggressively, it will "hollow out" thick text or erase the critical tiny dots (বিন্দু) in Bangla characters (like ড়, ঢ়, য়), causing severe OCR hallucination later.
+
+
+
+## 4. Temporary Images (Writing to Disk)
+
+Saving the output of each step (e.g., `page1_deskewed.png`, `page1_denoised.png`) to a temporary folder before passing it to the OCR engine.
+
+* **Pros:**
+* **Stateful Debugging:** If the pipeline crashes on page 402, you can open the temp folder and immediately see which processing step destroyed the image.
+* **Memory Safety:** It prevents RAM leaks when processing massive PDFs, as Python's garbage collector can struggle with thousands of large NumPy arrays.
+
+
+* **Cons:**
+* **I/O Bound Sluggishness:** Writing an uncompressed image to an SSD takes significantly longer than passing a pointer to a NumPy array in memory. For thousands of pages, Disk I/O becomes the primary limiting factor of your pipeline's speed.
+* **Storage Overhead:** Uncompressed intermediate images can quickly consume gigabytes of temporary disk space.
+
+[ME]:is it really required to put some preprocessing and inhancement for making ocr of humanitites nctb books? if yes show me appropriate points
+[AI]:Yes, it is **absolutely required**. Skipping preprocessing and enhancement when performing OCR on Bengali NCTB textbooks is a guaranteed path to pipeline failure.
+
+While English OCR is highly resilient to poor scans, Bengali OCR is notoriously brittle. NCTB Humanities books (such as *History of Bangladesh and World Civilization* or *Geography and Environment*) compound this issue because they are heavily text-dense, printed on thin paper, and often poorly scanned.
+
+Here are the specific reasons why preprocessing and enhancement are strictly necessary, and the key points you must address in your pipeline:
+
+## 1. Preserving Complex Bangla Orthography (Ligatures & Modifiers)
+
+Bangla has 11 vowels, 39 consonants, and over 170 compound characters (যুক্তবর্ণ), along with critical modifiers like the *bindu* (the dot under ড়, ঢ়, and য়).
+
+* **The Problem:** If a scan is noisy or low-resolution, standard OCR will mistake a tiny speck of dust for a *bindu*, or conversely, erase a *bindu* due to poor lighting. This turns "পাহাড়" (mountain) into "পাহার" (guard), entirely changing the semantic meaning of a geography or history text.
+* **The Fix:** **Non-Local Means Denoising** and **Adaptive Binarization**. You must carefully tune binarization thresholds to remove background noise without eroding the delicate strokes and dots that differentiate Bengali characters.
+
+## 2. Eradicating Text Bleed-Through (Ghosting)
+
+NCTB books are typically printed on thin, low-cost paper. When scanned, the text from the reverse side of the page often bleeds through, creating a faint overlay of reversed text behind the actual content.
+
+* **The Problem:** OCR engines will attempt to read these faint, reversed letters, resulting in massive blocks of hallucinated, nonsensical text mixed into your clean data.
+* **The Fix:** **Sauvola or Niblack Local Thresholding**. Global thresholding fails here. You need adaptive algorithms that can distinguish between the dark foreground text and the lighter bleed-through text based on local contrast.
+
+## 3. Correcting Skew and 3D Spine Curvature
+
+Thick textbooks like *Bangladesh and Global Studies* cannot lie perfectly flat on a scanner bed. This creates a severe 3D warp near the book's spine, curving the text lines downward.
+
+* **The Problem:** OCR engines expect text to run in straight, horizontal lines. If the text curves, the bounding box for a single word will accidentally clip the word on the line below it, destroying both words.
+* **The Fix:** **Deskewing and Page Dewarping**. You must apply geometric transformations (like OpenCV's `minAreaRect` or deep-learning-based dewarping like DocEnTr) to flatten the page virtually and ensure every line is perfectly horizontal before the OCR reads it.
+
+## 4. Multi-Column & Non-Linear Layouts
+
+Humanities books do not read like a simple novel. A single page might contain a primary text column, a shaded sidebar with a historical timeline, a picture of a monument with a caption, and a demographic table.
+
+* **The Problem:** If you pass the raw image to an OCR engine, it will read straight across the page from left to right. It will mash the sidebar text into the middle of the primary paragraph, completely destroying the reading order and the logical flow of the history lesson.
+* **The Fix:** **Layout Analysis (Segmentation)**. You must use layout parsing models (like Surya, LayoutLM, or YOLO) to draw bounding boxes around distinct structural elements first. You then crop these boxes and pass them to the OCR engine individually, preserving the correct hierarchical reading order.
+
+[ME]:show me a basic codebase for ocr with ingestion and enhancement  options with opencv, nupdf and easyocr with an open source vl model like qwen 3.5 4B
+[AI]:Here is a complete, modular Python codebase that demonstrates a hybrid OCR pipeline. It integrates **PyMuPDF** (for fast PDF ingestion), **OpenCV** (for enhancement), **EasyOCR** (for traditional lexical extraction), and **Qwen3-VL-4B-Instruct** (for state-of-the-art vision-language extraction).
+
+This architecture allows you to run fast EasyOCR for simple pages, or route complex/degraded pages to Qwen3-VL.
+
+### Prerequisites
+
+First, install the necessary libraries:
+
+```bash
+pip install pymupdf opencv-python numpy easyocr transformers qwen-vl-utils torch pillow
+
+```
+
+### 1. `ingestion.py` (PDF to Images)
+
+We use `PyMuPDF` (formerly imported as `fitz`) because it is significantly faster than `pdf2image` and allows direct extraction of pages into NumPy arrays without writing temporary files to disk.
+
+```python
+import fitz  # PyMuPDF
+import numpy as np
+import cv2
+
+class PDFIngestor:
+    def __init__(self, dpi=300):
+        self.dpi = dpi
+        # Zoom factor for PyMuPDF based on target DPI (72 is default PDF points)
+        self.zoom = self.dpi / 72.0 
+        self.mat = fitz.Matrix(self.zoom, self.zoom)
+
+    def extract_page_as_cv2(self, pdf_path, page_number):
+        """Yields an OpenCV BGR image directly from memory."""
+        doc = fitz.open(pdf_path)
+        
+        if page_number >= len(doc) or page_number < 0:
+            raise ValueError("Page number out of range.")
+            
+        page = doc.load_page(page_number)
+        pix = page.get_pixmap(matrix=self.mat, alpha=False)
+        
+        # Convert PyMuPDF Pixmap to NumPy array
+        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+        
+        # Convert RGB (PyMuPDF) to BGR (OpenCV standard)
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        doc.close()
+        return img_bgr
+
+```
+
+### 2. `enhancement.py` (OpenCV Preprocessing)
+
+This module addresses the issues of skew, background noise, and uneven lighting common in NCTB textbooks.
+
+```python
+import cv2
+import numpy as np
+
+class ImageEnhancer:
+    def __init__(self):
+        pass
+
+    def deskew(self, image):
+        """Corrects the rotation of the page using bounding box contours."""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        gray = cv2.bitwise_not(gray)
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+
+        # Get coordinates of all text pixels
+        coords = np.column_stack(np.where(thresh > 0))
+        angle = cv2.minAreaRect(coords)[-1]
+
+        # Fix OpenCV angle output variations
+        if angle < -45:
+            angle = -(90 + angle)
+        else:
+            angle = -angle
+
+        # Only deskew if the angle is significant
+        if abs(angle) < 0.5:
+            return image
+
+        (h, w) = image.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        return rotated
+
+    def clean_textbook_page(self, image, binarize=True):
+        """Applies NLM Denoising and Adaptive Binarization for Bangla orthography."""
+        # 1. Non-Local Means Denoising to preserve text edges while removing grain
+        denoised = cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
+        gray = cv2.cvtColor(denoised, cv2.COLOR_BGR2GRAY)
+
+        if binarize:
+            # 2. Adaptive Binarization to fix spine shadows and bleed-through
+            # Block size 31, C=15 is generally safe for 300 DPI textbook scans
+            binary = cv2.adaptiveThreshold(
+                gray, 255, 
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 
+                31, 15
+            )
+            return binary
+        return gray
+
+```
+
+### 3. `ocr_engines.py` (EasyOCR & Qwen3-VL)
+
+Here we wrap both models. EasyOCR is used for standard text, while Qwen3-VL-4B-Instruct is used as a powerful fallback for complex layouts, charts, and damaged text.
+
+```python
+import easyocr
+import torch
+from PIL import Image
+from transformers import AutoProcessor, AutoModelForCausalLM
+from qwen_vl_utils import process_vision_info
+import cv2
+
+class HybridOCREngine:
+    def __init__(self):
+        print("Loading EasyOCR (bn, en)...")
+        # Load Bangla and English
+        self.easy_ocr = easyocr.Reader(['bn', 'en'], gpu=torch.cuda.is_available())
+        
+        print("Loading Qwen3-VL-4B-Instruct...")
+        # Qwen3-VL configuration for complex reasoning and layout extraction
+        model_id = "Qwen/Qwen3-VL-4B-Instruct"
+        self.vlm_model = AutoModelForCausalLM.from_pretrained(
+            model_id, 
+            torch_dtype="auto", 
+            device_map="auto"
+        )
+        self.vlm_processor = AutoProcessor.from_pretrained(model_id)
+
+    def extract_with_easyocr(self, cv2_image):
+        """Fast, traditional OCR. Best for clean, single-column text."""
+        results = self.easy_ocr.readtext(cv2_image, detail=0, paragraph=True)
+        return "\n".join(results)
+
+    def extract_with_qwen(self, cv2_image, prompt="Extract all text from this page, preserving Markdown structure, tables, and lists. Keep the language exactly as written."):
+        """SOTA VLM Extraction. Best for complex layouts, maps, and damaged text."""
+        # Convert OpenCV BGR to PIL RGB for Transformers
+        pil_img = Image.fromarray(cv2.cvtColor(cv2_image, cv2.COLOR_BGR2RGB))
+        
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": pil_img},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+
+        # Prepare inputs using Qwen's utility
+        text = self.vlm_processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        
+        inputs = self.vlm_processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        ).to(self.vlm_model.device)
+
+        # Generate output
+        generated_ids = self.vlm_model.generate(**inputs, max_new_tokens=2048)
+        
+        # Trim the prompt from the generated output
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        
+        output_text = self.vlm_processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        
+        return output_text[0]
+
+```
+
+### 4. `main.py` (The Pipeline)
+
+Tie it all together.
+
+```python
+from ingestion import PDFIngestor
+from enhancement import ImageEnhancer
+from ocr_engines import HybridOCREngine
+
+def process_textbook_page(pdf_path, page_num):
+    # 1. Initialize modules
+    ingestor = PDFIngestor(dpi=300)
+    enhancer = ImageEnhancer()
+    ocr = HybridOCREngine()
+
+    # 2. Ingest
+    print(f"Extracting page {page_num}...")
+    raw_image = ingestor.extract_page_as_cv2(pdf_path, page_num)
+
+    # 3. Enhance
+    print("Deskewing and cleaning image...")
+    deskewed = enhancer.deskew(raw_image)
+    
+    # We create two versions: 
+    # - Binary for EasyOCR (needs clean black/white)
+    # - High-res color/gray for Qwen3-VL (VLMs prefer natural context)
+    binary_img = enhancer.clean_textbook_page(deskewed, binarize=True)
+    
+    # 4. Extract
+    print("\n--- Running EasyOCR (Fast/Lexical) ---")
+    easyocr_text = ocr.extract_with_easyocr(binary_img)
+    print(easyocr_text[:200] + "...\n")
+
+    print("--- Running Qwen3-VL-4B (Structural/Contextual) ---")
+    # Note: We pass the deskewed (but not binarized) image to the VLM. 
+    # VLMs perform better when they can see colors, faint lines, and natural shadows.
+    vlm_prompt = (
+        "You are an expert at digitizing Bengali textbooks. "
+        "Extract all text, convert tables to Markdown format, and ignore page numbers."
+    )
+    qwen_text = ocr.extract_with_qwen(deskewed, prompt=vlm_prompt)
+    print(qwen_text)
+
+if __name__ == "__main__":
+    # Example usage:
+    # process_textbook_page("history_of_bangladesh_class_9_10.pdf", 45)
+    pass
+
+```
+
+### Key Design Choices Addressed
+
+1. **In-Memory Operations:** Notice that `cv2.imwrite()` is never used. The `PyMuPDF` output is converted directly to a NumPy array, processed by OpenCV, and passed straight to PIL/Transformers. This solves the **I/O bottleneck** mentioned earlier.
+2. **Dual-Image Strategy:** The pipeline creates a strictly binarized image for EasyOCR (which requires stark contrast to find ligatures) but passes the *unbinarized*, color-deskewed image to Qwen3-VL. Vision-Language models use context (like the color of a sidebar or the gray shading of a table header) to understand layout; binarizing it destroys that semantic data.
+
+[ME]:i want to run this code primarily on kaggles free t4 gpus in parallel and make sure no library mismatch on kaggle 
+[AI]:To run this efficiently on Kaggle’s dual T4 GPUs, you face two primary challenges: **library mismatches** (Kaggle’s default `transformers` version is too old for the newest Qwen models) and **parallel execution overhead** (Jupyter notebooks often crash when trying to share GPU memory across threads).
+
+Because the `Qwen3-VL-4B-Instruct` model requires roughly 8-9GB of VRAM in `bfloat16`, it fits perfectly on a single 15GB T4 GPU. Since Kaggle provides **two** T4 GPUs, the optimal architecture is **Data Parallelism**: we spawn two isolated worker processes, assign one to `GPU 0` and the other to `GPU 1`, and distribute the textbook pages between them.
+
+Here is the exact Kaggle-ready codebase to achieve this without OOM (Out of Memory) or library errors.
+
+### Step 1: The Critical Installation Block
+
+Run this in your first Kaggle cell. Qwen3-VL enforces a strict requirement for `transformers >= 4.57.0`. If you use Kaggle's default version, you will get an `unrecognized architecture` error.
+
+```python
+# CELL 1: Force upgrade dependencies to prevent Kaggle environment mismatches
+!pip install --upgrade "transformers>=4.57.0" accelerate qwen-vl-utils easyocr pymupdf opencv-python-headless torch torchvision pillow
+
+```
+
+### Step 2: The Parallel Pipeline
+
+Run this in your second Kaggle cell. This script uses Python's `spawn` multiprocessing context, which is mandatory in Jupyter notebooks to prevent CUDA initialization crashes.
+
+```python
+# CELL 2: Parallel Pipeline Execution
+import os
+import multiprocessing as mp
+import concurrent.futures
+import fitz  # PyMuPDF
+import numpy as np
+import cv2
+from PIL import Image
+from qwen_vl_utils import process_vision_info
+
+# ==========================================
+# 1. WORKER INITIALIZATION (Runs once per GPU)
+# ==========================================
+def init_worker(gpu_id):
+    """
+    Initializes models on a specific isolated GPU to prevent VRAM overlap.
+    We set CUDA_VISIBLE_DEVICES before importing torch so each worker 
+    thinks it has exclusive access to a single T4.
+    """
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    
+    global model, processor, easy_ocr
+    import torch
+    from transformers import AutoProcessor, AutoModelForCausalLM
+    import easyocr
+    
+    print(f"[Worker {gpu_id}] Loading EasyOCR & Qwen3-VL-4B...")
+    
+    # Load EasyOCR (uses the visible GPU automatically)
+    easy_ocr = easyocr.Reader(['bn', 'en'], gpu=True)
+    
+    # Load Qwen3-VL. bfloat16 reduces memory to ~8GB, fitting safely inside the 15GB T4
+    model_id = "Qwen/Qwen3-VL-4B-Instruct"
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, 
+        torch_dtype=torch.bfloat16, 
+        device_map="auto" 
+    )
+    print(f"[Worker {gpu_id}] Models loaded successfully.")
+
+# ==========================================
+# 2. IMAGE PREPROCESSING (Runs inside worker)
+# ==========================================
+def extract_and_enhance(pdf_path, page_num):
+    # PyMuPDF Extraction (Memory-efficient, no disk I/O)
+    doc = fitz.open(pdf_path)
+    page = doc.load_page(page_num)
+    zoom = 300 / 72.0 
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+    raw_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    doc.close()
+
+    # OpenCV Deskew
+    gray = cv2.cvtColor(raw_img, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.threshold(cv2.bitwise_not(gray), 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+    coords = np.column_stack(np.where(thresh > 0))
+    angle = cv2.minAreaRect(coords)[-1]
+    angle = -(90 + angle) if angle < -45 else -angle
+    
+    deskewed = raw_img
+    if abs(angle) > 0.5:
+        (h, w) = raw_img.shape[:2]
+        M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+        deskewed = cv2.warpAffine(raw_img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+    # Binarize strictly for EasyOCR
+    denoised = cv2.fastNlMeansDenoisingColored(deskewed, None, 10, 10, 7, 21)
+    gray_denoised = cv2.cvtColor(denoised, cv2.COLOR_BGR2GRAY)
+    binary_img = cv2.adaptiveThreshold(gray_denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15)
+
+    return deskewed, binary_img
+
+# ==========================================
+# 3. EXTRACTION PIPELINE (Runs inside worker)
+# ==========================================
+def process_page_task(task_data):
+    pdf_path, page_num = task_data
+    global model, processor, easy_ocr
+    import torch
+    
+    try:
+        # Preprocess
+        deskewed_color, binarized = extract_and_enhance(pdf_path, page_num)
+        
+        # EasyOCR extraction
+        lexical_text = "\n".join(easy_ocr.readtext(binarized, detail=0, paragraph=True))
+        
+        # Qwen3-VL extraction
+        pil_img = Image.fromarray(cv2.cvtColor(deskewed_color, cv2.COLOR_BGR2RGB))
+        prompt = "Extract all text from this page, preserving Markdown structure and tables. Keep the language exactly as written."
+        
+        messages = [{"role": "user", "content": [{"type": "image", "image": pil_img}, {"type": "text", "text": prompt}]}]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(messages)
+        
+        inputs = processor(
+            text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt"
+        ).to(model.device)
+
+        with torch.no_grad():
+            generated_ids = model.generate(**inputs, max_new_tokens=2048)
+            
+        generated_ids_trimmed = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
+        qwen_text = processor.batch_decode(generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        
+        return {"page": page_num, "status": "success", "easyocr": lexical_text, "qwen": qwen_text}
+    except Exception as e:
+        return {"page": page_num, "status": "failed", "error": str(e)}
+
+# ==========================================
+# 4. KAGGLE EXECUTION CONTROLLER
+# ==========================================
+if __name__ == "__main__":
+    # Ensure multiprocessing plays nicely with Kaggle Jupyter environment
+    mp_context = mp.get_context('spawn')
+    
+    # Setup test file (Replace with your actual uploaded dataset path)
+    PDF_FILE = "/kaggle/input/your-dataset/humanities_textbook.pdf" 
+    PAGES_TO_PROCESS = [10, 11, 12, 13, 14, 15, 16, 17] # Batch of pages to read
+    
+    # We assign pages in round-robin format to GPU 0 and GPU 1
+    tasks_gpu_0 = [(PDF_FILE, p) for p in PAGES_TO_PROCESS[0::2]]
+    tasks_gpu_1 = [(PDF_FILE, p) for p in PAGES_TO_PROCESS[1::2]]
+
+    print("Starting parallel processing on 2x T4 GPUs...")
+    
+    results = []
+    
+    # Launch Process Pool for GPU 0
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=mp_context, initializer=init_worker, initargs=(0,)) as executor0:
+        # Launch Process Pool for GPU 1 simultaneously
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=mp_context, initializer=init_worker, initargs=(1,)) as executor1:
+            
+            # Map tasks to their respective executors asynchronously
+            future_to_page = {}
+            for task in tasks_gpu_0:
+                future = executor0.submit(process_page_task, task)
+                future_to_page[future] = task[1]
+                
+            for task in tasks_gpu_1:
+                future = executor1.submit(process_page_task, task)
+                future_to_page[future] = task[1]
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_page):
+                page_num = future_to_page[future]
+                try:
+                    res = future.result()
+                    results.append(res)
+                    print(f"Page {page_num} completed.")
+                except Exception as exc:
+                    print(f"Page {page_num} generated an exception: {exc}")
+
+    print(f"Pipeline finished! Successfully processed {len(results)} pages.")
+
+```
+
+### Why this design avoids Kaggle crashes:
+
+1. **The `spawn` context:** Jupyter defaults to `fork`, which attempts to copy the existing PyTorch state from the main notebook thread into child processes. This immediately crashes Kaggle CUDA drivers. `spawn` creates a fresh, clean Python environment for each GPU.
+2. **`CUDA_VISIBLE_DEVICES` Isolation:** Passing `0` to one worker and `1` to the other creates a sandbox. When `device_map="auto"` triggers inside the worker, it only sees *one* GPU, forcing it to load directly onto that specific T4.
+3. **Lazy Memory Loading:** By putting the `import torch` and model loading *inside* the `init_worker` function rather than at the top of the file, the main Jupyter thread uses virtually zero RAM, leaving Kaggle's ~30GB System RAM entirely free to handle the two worker processes loading the models.
+
+[ME]:how should i handle boxed works, maps, table and other semantic fig other than text porse on such books
+[AI]:In NCTB Humanities textbooks, non-prose elements (such as callout boxes, sector maps, demographic tables, and historical artifacts) contain **more than 60% of the high-yield General Knowledge (GK) facts**.
+
+If you feed these pages into a standard OCR engine as raw text, two fatal errors happen:
+
+1. **Context Smearing:** A sidebar callout box gets inserted into the middle of an unrelated historical narrative.
+2. **Visual Blindness:** Maps, charts, and artifacts lose their spatial relationships, legends, and captions.
+
+Here is the architectural strategy to isolate, extract, and index each of these elements for a SOTA RAG pipeline.
+
+---
+
+## 1. Boxed Works & Callouts (একক কাজ, জেনে রাখা ভালো, সারসংক্ষেপ)
+
+Textbooks use shaded or bordered boxes for two main purposes: **Critical Fact Callouts** (e.g., *"জেনে রাখা ভালো: পলাশীর যুদ্ধের পটভূমি"*) and **Student Activities** (e.g., *"দলগত কাজ: তোমার এলাকার মানচিত্র আঁক"*).
+
+### Extraction & Structuring
+
+* **Segregation:** Do not let box text interrupt the main column flow. Use Layout Analysis (or VLM instructions) to extract the box as an independent structural block.
+* **Format:** Convert them into standard Markdown callout syntax:
+```markdown
+> [!NOTE] জেনে রাখা ভালো
+> ১৯৭১ সালের ২৫শে মার্চ রাতে পরিচালিত অভিযানের নাম ছিল 'অপারেশন সার্চলাইট'।
+
+```
+
+
+* **Filtering Rule:** If building a strict factual QA/GK retriever, classify box types. **Retain** "Important Fact" boxes; **deprioritize or discard** purely pedagogical "Home Task" (`একক কাজ / বাড়ির কাজ`) prompts, as they add noise to dense vector search.
+
+---
+
+## 2. Tables (পরিসংখ্যান, সময়রেখা, ভৌগোলিক উপাত্ত)
+
+Humanities tables (e.g., population censuses, river lengths, chronologies of Mughal rulers) fail in vector search if extracted as raw space-separated text because column headers become detached from cell values.
+
+### Extraction & Serialization
+
+* **Hierarchical Markdown / HTML:** Extract tables into clean Markdown tables with explicit column headers.
+* **Row-Level Natural Language Serialization:** For vector databases, convert dense table rows into atomic sentences alongside the table:
+* *Raw row:* `| পদ্মা | উৎপত্তিস্থল: হিমালয়ের গঙ্গোত্রী হিমবাহ | দৈর্ঘ্য: ৩৬৬ কিমি |`
+* *Serialized chunk:* `"পদ্মা নদী হিমালয়ের গঙ্গোত্রী হিমবাহ থেকে উৎপন্ন হয়েছে এবং এর দৈর্ঘ্য ৩৬৬ কিলোমিটার।"`
+* *Why:* Embedding models (like `BGE-M3` or `mE5`) match natural language queries far better against serialized sentences than raw pipe-delimited Markdown tables.
+
+
+
+---
+
+## 3. Maps & Spatial Diagrams (মুক্তিযুদ্ধের সেক্টর, ভূ-প্রকৃতি, রাজনৈতিক সীমানা)
+
+Maps cannot be parsed by standard OCR engines because the text is oriented at various angles and text meaning depends on geographic coordinates and map legends.
+
+### VLM-Assisted Map Transcription
+
+Pass cropped map images to a Vision-Language Model (e.g., Qwen-VL) with an explicit extraction schema:
+
+1. **Map Title & Scope:** (e.g., *"বাংলাদেশের ভূ-প্রাকৃতিক অঞ্চলের মানচিত্র"*).
+2. **Legend / Key Decoupling:** Extract colors, symbols, and their corresponding meanings.
+3. **Entity-Region Mapping:** Transcribe labeled districts, rivers, boundaries, or sectors into an explicit list.
+
+```markdown
+<!-- [MAP_START: Sector Map of 1971] -->
+**Title:** ১৯৭১ সালের মুক্তিযুদ্ধের সেক্টরসমূহ
+**Key Entities Extracted:**
+- সেক্টর ১: চট্টগ্রাম, পার্বত্য চট্টগ্রাম ও নোয়াখালী জেলার অংশবিশেষ (কমান্ডার: মেজর জিয়াউর রহমান / মেজর রফিকুল ইসলাম)
+- সেক্টর ২: ঢাকা, কুমিল্লা, ফরিদপুর ও নোয়াখালীর অংশবিশেষ (কমান্ডার: মেজর খালেদ মোশাররফ)
+<!-- [MAP_END] -->
+
+```
+
+---
+
+## 4. Historical Figures, Artifacts & Monuments (ভাস্কর্য, মুদ্রা, প্রাচীন নিদর্শন)
+
+Photos of archaeological sites (মহাস্থানগড়, লালবাগ কেল্লা), ancient coins, or historical portraits usually carry essential context in their **captions** rather than the image alone.
+
+### Multi-Modal Metadata Tagging
+
+* **Caption Binding:** Always bind the image bounding box to its nearest caption block (`চিত্র ৩.২: সোমপুর মহাবিহার`).
+* **Contextual Expansion:** Use the VLM to inspect both the image and the surrounding paragraph to produce a rich semantic summary:
+* *Image reference:* `assets/figures/sompur_bihar_p45.jpg`
+* *Description:* *"পাহাড়পুরের সোমপুর মহাবিহারের ধ্বংসাবশেষ। এটি দ্বিতীয় পাল রাজা ধর্মপাল কর্তৃক নির্মিত বৌদ্ধ বিহার, যা নওগাঁ জেলায় অবস্থিত। UNESCO বিশ্ব ঐতিহ্যবাহী স্থান।"*
+
+
+* **Retrieval Utility:** When the retriever surfaces this chunk, your frontend can render the factual text *and* present the actual image file to the student.
+
+---
+
+## 5. Unified Chunk & Document Schema
+
+To store these diverse elements cleanly in your vector database (e.g., Qdrant, Chroma, Vespa), represent each extracted page using a structured document model:
+
+```json
+{
+  "doc_id": "ssc_bangladesh_history_ch03_p45",
+  "book_name": "History of Bangladesh and World Civilization",
+  "chapter": "অধ্যায় ৩: প্রাচীন বাংলার ইতিহাস",
+  "page_number": 45,
+  "content_blocks": [
+    {
+      "type": "prose",
+      "text": "পাল বংশের রাজারা প্রায় চারশত বছর বাংলা শাসন করেন..."
+    },
+    {
+      "type": "table",
+      "raw_markdown": "| রাজা | শাসনকাল |\n|---|---|\n| গোপাল | ৭৫০-৭৭০ খ্রিস্টাব্দ |",
+      "serialized_facts": ["গোপাল আনুমানিক ৭৫০ থেকে ৭৭০ খ্রিস্টাব্দ পর্যন্ত শাসন করেন।"]
+    },
+    {
+      "type": "map",
+      "image_ref": "maps/p45_pal_empire.png",
+      "description": "পাল সাম্রাজ্যের সর্বোচ্চ বিস্তৃতির মানচিত্র। এতে বাংলা ও বিহার অঞ্চল অন্তর্ভুক্ত ছিল।"
+    },
+    {
+      "type": "callout_box",
+      "box_category": "gk_fact",
+      "text": "জেনে রাখা ভালো: ধর্মপাল 'পরমেশ্বর পরমভট্টারক মহারাজাধিরাজ' উপাধি গ্রহণ করেন।"
+    }
+  ]
+}
+
+```
+
+---
+
+## 6. VLM System Prompt Template
+
+When routing an extracted textbook page to Qwen3-VL, use a system prompt that explicitly enforces this structural separation:
+
+```text
+You are an expert academic digitizer for NCTB Bengali Humanities textbooks.
+Analyze the provided page image and extract content into strict Markdown adhering to these rules:
+
+1. MAIN BODY: Transcribe standard text paragraphs maintaining correct reading order across columns.
+2. TABLES: Convert tables to standard Markdown tables. Ensure all column headers are explicitly named.
+3. CALLOUT BOXES: Wrap shaded sidebars, fact boxes, or notes in blockquotes: `> [!NOTE] <Title> \n> <Content>`.
+4. MAPS & DIAGRAMS: Do not ignore maps. Summarize their title, list all labeled geographical entities, sectors, or legend items in a structured bulleted list under `### [মানচিত্র/ডায়াগ্রাম বিশ্লেষণ]`.
+5. FIGURES & ARTIFACTS: Transcribe image captions exactly and summarize the historical significance shown in the image.
+6. PRESERVE BENGALI SCRIPT: Do not translate or romanize Bengali words, dates, or numerals.
+
+```
+[ME]:i ll. create a md file for all the pages of ocr texts 
+[AI]:```python
+import os
+
+md_content = """# বাংলাদেশের ইতিহাস ও বিশ্বসভ্যতা (SSC History)
+## অধ্যায় ৩: প্রাচীন বাংলার জনপদ (Ancient Janapadas of Bengal)
+
+---
+
+### পৃষ্ঠা ১৫ (Page 15)
+
+প্রাচীন যুগে বাংলা এখনকার মতো কোনো একক অখণ্ড রাষ্ট্র বা রাজ্য ছিল না। বাংলার বিভিন্ন অংশ তখন ছোট ছোট অঞ্চলে বিভক্ত ছিল। প্রতিটি অঞ্চলের শাসক যার যার মতো শাসন করতেন। বাংলার এই অঞ্চলগুলোকে তখন সমষ্টিগতভাবে নাম দেওয়া হয়েছিল 'জনপদ'। বাংলা নামের একটি অখণ্ড দেশের জন্ম একবারে হয়নি। এর যাত্রা শুরু হয় জনপদগুলোর মধ্য দিয়ে।
+
+> [!NOTE] জেনে রাখা ভালো
+> চতুর্থ শতক হতে গুপ্ত যুগ, গুপ্ত পরবর্তী যুগ, পাল, সেন প্রভৃতি আমলের উৎকীর্ণ শিলালিপি ও সাহিত্য গ্রন্থে প্রাচীন বাংলার জনপদগুলোর নাম পাওয়া যায়।
+
+---
+
+### পৃষ্ঠা ১৬ (Page 16)
+
+### [মানচিত্র বিশ্লেষণ]
+**মানচিত্রের শিরোনাম:** প্রাচীন বাংলার জনপদসমূহ
+**নিষ্কাশিত উপাত্ত (Extracted Entities):**
+* **পুণ্ড্র (Pundra):** বর্তমান বগুড়া, দিনাজপুর ও রাজশাহী অঞ্চল।
+* **বরেন্দ্র (Varendra):** পুণ্ড্রবর্ধন জনপদের একটি অংশ, করতোয়া নদীর পশ্চিম তীরে অবস্থিত।
+* **বঙ্গ (Vanga):** বৃহত্তর ঢাকা, ফরিদপুর ও কুষ্টিয়া অঞ্চল।
+* **সমতট (Samatata):** বৃহত্তর কুমিল্লা ও নোয়াখালী অঞ্চল।
+* **হরিকেল (Harikela):** চট্টগ্রামের পাহাড়ি অঞ্চল এবং সিলেট।
+
+প্রাচীন বাংলার গুরুত্বপূর্ণ জনপদগুলোর বর্তমান অবস্থান ও বিবরণ নিচে দেওয়া হলো:
+
+| জনপদের নাম | বর্তমান অবস্থান (Modern Location) | ঐতিহাসিক রাজধানী/কেন্দ্র (Historical Center) |
+|---|---|---|
+| পুণ্ড্র | বগুড়া, রাজশাহী, রংপুর, দিনাজপুর | পুণ্ড্রনগর (মহাস্থানগড়) |
+| বঙ্গ | ঢাকা, ফরিদপুর, কুষ্টিয়া, বৃহত্তর বরিশাল | বিক্রমপুর |
+| সমতট | কুমিল্লা ও নোয়াখালী | বড়কামতা |
+| হরিকেল | সিলেট, চট্টগ্রাম | সিলেট |
+
+---
+
+### পৃষ্ঠা ১৭ (Page 17)
+
+**পুণ্ড্র (Pundra):** প্রাচীন বাংলার জনপদগুলোর মধ্যে অন্যতম হলো পুণ্ড্র। বলা হয়ে থাকে, পুণ্ড্র বলে এক জাতি এ অঞ্চল গড়ে তুলেছিল। বর্তমান বগুড়া, রংপুর, রাজশাহী ও দিনাজপুর অঞ্চল নিয়ে এ পুণ্ড্র জনপদটির সৃষ্টি হয়েছিল। পুণ্ড্রদের রাজ্যের রাজধানীর নাম ছিল পুণ্ড্রনগর। পরবর্তীকালে এর নাম হয় মহাস্থানগড়।
+
+**চিত্র ৩.১ (Figure 3.1):** মহাস্থানগড়ের ধ্বংসাবশেষ। 
+*বিশ্লেষণ/ক্যাপশন:* এটি প্রাচীন পুণ্ড্রবর্ধনভুক্ত পুণ্ড্রনগরের ধ্বংসাবশেষ। এখানেই পাওয়া গেছে বাংলার প্রাচীনতম শিলালিপি 'ব্রাহ্মী লিপি' (Brahmi Script)। প্রাচীন সভ্যতার নিদর্শনে পুণ্ড্রই ছিল প্রাচীন বাংলার সবচেয়ে সমৃদ্ধ জনপদ।
+
+---
+
+### পৃষ্ঠা ১৮ (Page 18)
+
+**বঙ্গ (Vanga):** বঙ্গ একটি অতি প্রাচীন জনপদ। বর্তমান বাংলাদেশের পূর্ব ও দক্ষিণ-পূর্ব দিকে বঙ্গ জনপদ নামে একটি অঞ্চল গড়ে উঠেছিল। অনুমান করা হয়, এখানে 'বঙ্গ' বলে এক জাতি বাস করত। তাই জনপদটি পরিচিত হয় 'বঙ্গ' নামে। প্রাচীন শিলালিপিতে বঙ্গের দুটি অঞ্চলের নাম পাওয়া যায়—একটি 'বিক্রমপুর' এবং অন্যটি 'নাব্য'।
+
+> [!NOTE] একক কাজ (Student Task - To be filtered in DB)
+> তোমার জেলার প্রাচীন নাম কী ছিল তা শিক্ষকের সহায়তায় জেনে খাতায় লেখো এবং একটি মানচিত্রে চিহ্নিত করো।
+
+"""
+
+file_path = "nctb_humanities_ocr_output.md"
+with open(file_path, "w", encoding="utf-8") as f:
+    f.write(md_content)
+
+print(f"File created at {file_path}")
+
+
+```
+
+```text
+File created at nctb_humanities_ocr_output.md
+
+
+```
+
+Your Markdown file containing the structured OCR output is ready.
+
+
+I have generated a sample file representing how the output of the advanced multimodal OCR pipeline should look for an NCTB Humanities textbook (*History of Bangladesh and World Civilization*).
+
+This file demonstrates the architectural design choices we discussed:
+
+* **Contextual Prose:** Main paragraphs are extracted cleanly without interruption.
+* **Semantic Callouts:** Fact boxes (`জেনে রাখা ভালো`) are separated using Markdown blockquotes `> [!NOTE]`, while student activities (`একক কাজ`) are tagged appropriately so your indexing logic can filter them out to reduce noise.
+* **Serialized Tables:** Tabular data is perfectly formatted into Markdown tables, preserving the column headers (e.g., Region, Modern Location, Historical Center).
+* **VLM Map Extraction:** Instead of failing on spatial data, maps are extracted into a structured `[মানচিত্র বিশ্লেষণ]` block, listing out the geographical entities identified by the model.
+* **Image Metadata:** Artifacts (like Mahasthangarh) have their captions bonded to them with added context.
+
+When you pass this Markdown file into your chunking engine (like LangChain's `MarkdownHeaderTextSplitter`), it will gracefully slice the document by page and by semantic block, resulting in highly accurate vectors for your General Knowledge RAG application.
+
+[ME]:i have uploaded thr project structure for the full rag based project of gk prep. suggest me Ingest+Enhance in short bassed on chats so far and kaggles success
+[AI]:Here is the short, executive summary of the architecture and design choices we have established for the Ingest + Enhance pipeline:
+
+### 1. Ingestion (PyMuPDF)
+
+* **Method:** In-memory rasterization using PyMuPDF (`fitz`).
+* **Settings:** Render directly to NumPy arrays at 300 DPI (Zoom factor: 300/72.0).
+* **Why:** Completely avoids disk I/O bottlenecks (no temporary image files) and is significantly faster than wrapper libraries like `pdf2image`.
+
+### 2. Enhancement (OpenCV)
+
+* **Deskewing:** Contour-based angle detection (`minAreaRect`) + Affine Transformation (`cv2.warpAffine`).
+* *Condition:* Only executed if the skew angle is $> 0.5^\circ$.
+
+
+* **Denoising:** Non-Local Means (NLM) (`cv2.fastNlMeansDenoisingColored`).
+* *Why:* Preserves sharp text edges while removing background grain, which is critical for retaining delicate Bangla modifiers (like the *bindu*).
+
+
+* **Binarization:** Local Adaptive Thresholding (Gaussian/Sauvola) (`cv2.adaptiveThreshold`).
+* *Why:* Conquers text bleed-through and spine shadows common in thin NCTB textbook paper without eroding text.
+
+
+
+### 3. Pipeline Routing (Dual-Stream Strategy)
+
+* **Path A (Lexical / EasyOCR):** Receives the *fully binarized* image. Standard OCR engines require high contrast (black text on white background) to accurately match character ligatures.
+* **Path B (Multimodal / Qwen3-VL):** Receives the *deskewed, natural color* image. Vision-Language Models need original shading, colors, and shadows to understand semantic layouts (like shaded callout boxes, table borders, and map features).
+
+### 4. Execution Environment (Kaggle T4 GPUs)
+
+* **Parallelism:** Data Parallelism via Python's `spawn` multiprocessing context. (Jupyter's default `fork` causes CUDA crashes).
+* **GPU Isolation:** Setting `CUDA_VISIBLE_DEVICES` explicitly per worker (0 or 1).
+* **Why:** Ensures the ~8GB VRAM footprint of Qwen3-VL-4B (in `bfloat16`) sits safely on each 15GB T4 GPU without memory overlap or Out-of-Memory (OOM) errors.
+Ingest+Enhance | Load scanned images with stable document/page IDs and improve OCR readability without changing source files. | Images under `data/raw/`; existing completed OCR Markdown may bypass image ingest during index-only rebuilds. | Deterministic OpenCV deskew, non-local-means denoise and adaptive binarization; generative enhancement is honestly disabled. | Recursively discover supported image formats, preserve `Page.id`/`doc_id`, and write cleaned images to `data/interim/preprocessed` only when images exist. | `loader → preprocess → enhance` consumes and returns the fixed `Page` contract; empty input remains valid for precomputed OCR mode. | Pytest checks discovery, stable IDs, preprocessing output and identity enhancement; parameters live in `config.yaml`. | CPU preprocessing is an offline batch before GPU OCR; raw scans are never overwritten. | Track source paths and stable IDs; validate unreadable images and failed output writes; keep generated interim images gitignored. |
+
+[ME]:i have uploaded my updated py file dl-ocr-parallel.py and its layout choices that seemed working for me Connect nearby text strokes, detect horizontal/vertical table grids, filter small contours, merge overlapping boxes and sort top to bottom then lefttoright,OpenCV adaptive thresholding.show me its pros and cons for this layout design coiche and summarize
+[AI]:This specific approach—using morphological operations (dilation), contour filtering, line detection, and heuristic sorting ($Y$, then $X$)—is a classic, deterministic **Computer Vision (Heuristic) Layout Analysis** strategy. You are effectively building a layout parser from scratch using OpenCV instead of relying on a deep learning model like Surya or LayoutLM.
+
+Here is the breakdown of the pros and cons of this specific layout design choice for processing NCTB textbooks.
+
+### Pros and Cons: Heuristic OpenCV Layout Analysis
+
+| Feature | The Pros (Why it works) | The Cons (Where it breaks) |
+| --- | --- | --- |
+| **Connecting text strokes (Dilation)** | Groups loose words into cohesive paragraph blocks, reducing the number of OCR calls. | If line spacing is tight, it merges separate lines or paragraphs vertically into a massive, unreadable block. |
+| **Grid Detection (H/V Lines)** | Exceptionally accurate for extracting rigidly boxed tables and separating them from prose. | Fails completely on "borderless" or "invisible grid" tables, which are common in humanities demographics. |
+| **Filtering small contours** | Instantly destroys background noise, dust, and scan artifacts before OCR even sees them. | Can accidentally delete floating punctuation, page numbers, or vital Bangla modifiers (like commas or *bindus*) if the threshold is too high. |
+| **Top-to-Bottom, Left-to-Right Sort** | Very easy to code; works flawlessly for simple, single-column reading material like novels. | **Critically fails on multi-column layouts.** It will read across the page, combining sentence halves from two different columns. |
+
+---
+###Finalized layout design choice
+Find OCR-ready text and table regions in reading order while retaining each page identity. | Preprocessed page images plus their fixed `Page` metadata. | OpenCV adaptive thresholding, morphology, contour proposals and ruling-line table detection adapted from `dl-ocr-parallel.py`. | Connect nearby text strokes, detect horizontal/vertical table grids, filter small contours, merge overlapping boxes and sort top-to-bottom then left-to-right. | Emit fixed `Region(page_id, bbox, kind)` objects and register the page image/doc mapping required by the fixed contract for downstream OCR. | Synthetic-page tests verify non-empty ordered regions and the OCR image-path bridge; invalid images fail explicitly. | Lightweight CPU layout pass; EasyOCR remains the GPU stage. | Monitor pages that fall back to one full-page text region and table/text proposal counts for layout drift. |
+### Deep Dive: The Advantages
+
+**1. Blazing Fast and CPU-Bound**
+Because this relies entirely on linear algebra and OpenCV matrix operations, it executes in milliseconds on a CPU. This frees up 100% of your GPU VRAM for the actual OCR and VLM extraction steps, preventing bottlenecks when running in parallel on Kaggle.
+
+**2. Absolute Explainability**
+When an AI layout model (like YOLO or LayoutLM) misses a paragraph, you cannot easily fix it. With your OpenCV pipeline, if a sidebar is missed or a table is sliced in half, you know exactly which parameter to tweak (e.g., adjust the contour area threshold from `150` to `50`, or change the dilation kernel from `(5,5)` to `(10,2)`).
+
+**3. Superior Ruled-Table Extraction**
+For explicit tables with drawn borders (like timelines or census data), OpenCV's morphological opening with horizontal and vertical kernels often isolates the exact cell coordinates more reliably than lightweight AI models, ensuring perfect row/column mapping.
+
+---
+
+### Deep Dive: The Disadvantages
+
+**1. The Multi-Column Sorting Trap**
+Sorting "Top-to-Bottom, then Left-to-Right" assumes a strict, single-column document. NCTB Humanities textbooks frequently feature side-by-side columns, boxed sidebars (`জেনে রাখা ভালো`), and text wrapped around maps. Your sorting logic will force the OCR to read horizontally across the page—taking line 1 of column A, appending line 1 of column B, and destroying the semantic meaning of the sentence.
+
+**2. Hyperparameter Brittleness**
+Your pipeline is now highly sensitive to scan resolution. A dilation kernel of `(15, 5)` might perfectly merge words into lines for a 300 DPI scan. If you feed the same code a 150 DPI scan or a page with a smaller font size, that exact same kernel will turn the entire page into a single black blob.
+
+**3. Inability to Classify Regions**
+OpenCV contours do not know *what* they are boxing. They draw a box around a paragraph, a box around an image caption, and a box around a map. To an OCR engine, they all just look like text. You lose the semantic tagging (e.g., "this box is an image, this box is a header") that a multimodal layout parser natively provides.
+
+---
+
+### Summary
+
+Your updated layout choice is highly efficient, deterministic, and excellent for saving GPU resources. It will perform exceptionally well on **single-column textbook pages and heavily bordered tables**.
+
+However, it introduces severe fragility regarding **reading order**. To make this production-ready for complex textbook layouts, you must upgrade your sorting algorithm from a naive $Y-X$ sort to an **intersection-over-union (IoU) column-aware sort**, which checks if bounding boxes share the same horizontal space before deciding which one comes next.
+[ME]:show me some best choices for embedding model and reranker for such corpus if bangla
+[AI]:When dealing with a Bengali corpus—especially Humanities and General Knowledge textbooks rich in specific dates, geographical locations, and historical names—standard English-centric models will fail. Bengali suffers from high tokenization fragmentation (where a single word gets split into many meaningless sub-word tokens), which dilutes the semantic vector.
+
+To build a high-performance retrieval architecture, you need models with strong multilingual vocabularies and the ability to handle exact-entity matching. Here are the state-of-the-art choices for your pipeline.
+
+### 1. The Embedding Models (Dense Retrieval)
+
+For the initial retrieval phase, you need a model that natively understands Bengali semantics without relying on intermediate translation.
+
+| Model | Why it fits Bengali GK | Architectural Note |
+| --- | --- | --- |
+| **`BAAI/bge-m3`** | **The Current SOTA.** The "M3" stands for Multi-linguality, Multi-granularity, and Multi-Functionality. It is heavily trained on multilingual datasets and handles Bengali exceptionally well. | **Crucial Advantage:** BGE-M3 outputs three types of embeddings simultaneously: Dense vectors (for semantics), Sparse vectors (like BM25 for exact keyword matching), and ColBERT-style multi-vectors. This is perfect for GK where you need both the concept ("ancient wars") and the exact keyword ("পলাশী"). |
+| **`intfloat/multilingual-e5-large`** | Extremely stable and highly performant across 100+ languages. It requires a specific prefix (`"query: "` or `"passage: "`) which forces the model to separate the semantic space of the question from the document. | Slightly less capable of exact keyword matching than BGE-M3, but often provides tighter semantic clustering for abstract concepts. |
+| **`vidore/colpali`** (Visual Embedding) | If you bypass OCR and layout parsing entirely, ColPali uses a Vision-Language Model (PaliGemma) to embed the *image* of the textbook page directly into a dense vector space. | Bypasses the Bengali tokenization issue completely. It embeds the visual structure of maps and tables alongside the text. Highly recommended if your pipeline involves VLM extraction. |
+
+### 2. The Rerankers (Cross-Encoders)
+
+Vector search (Bi-encoders) is fast but imprecise. It calculates the distance between a query vector and document vector in isolation. A Reranker (Cross-encoder) takes the top 50 results from your vector database, concatenates the query and the document chunk, and passes them *together* through a transformer to score their actual relevance.
+
+This step is **mandatory** for General Knowledge RAG to push the exact factual answer to the top.
+
+| Model | Deployment Type | Performance on Bengali |
+| --- | --- | --- |
+| **`BAAI/bge-reranker-v2-m3`** | Local / Open Source | The perfect pair to the BGE-M3 embedding model. It is a lightweight cross-encoder trained specifically to handle the same multilingual distribution, ensuring that exact historical dates and Bengali entity names are heavily weighted. |
+| **Cohere Multilingual Rerank 3** (`rerank-multilingual-v3.0`) | Commercial API | If you are not constrained to running everything locally, Cohere's multilingual reranker is widely considered the absolute best in the industry for non-English text. It handles complex Bengali phrasing and semantic overlaps flawlessly. |
+| **`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`** | Local / Open Source | A solid, extremely fast, lightweight alternative. It was trained on the multilingual MARCO dataset. It is slightly older than BGE-v2 but requires significantly less compute if your Kaggle GPUs are bottlenecked. |
+
+### The Recommended Architecture
+
+If you are deploying this on Kaggle T4s and want the highest possible accuracy for Bengali facts, the optimal design choice is:
+
+1. **Ingestion:** Extract and clean text/tables.
+2. **Indexing:** Chunk the text and embed using **`BAAI/bge-m3`**. Store both the dense vectors and the sparse (lexical) vectors in a database like Qdrant or Milvus.
+3. **Retrieval:** Use **Hybrid Search** (Dense + Sparse) to fetch the top 30 chunks.
+4. **Reranking:** Pass those 30 chunks through **`BAAI/bge-reranker-v2-m3`** to get the absolute top 3-5 contexts.
+5. **Generation:** Feed the top 3-5 reranked contexts into your LLM (e.g., Qwen) to generate the answer.
+[ME] :some texts got trucated and missing senetneces. how to deal with it? also why its required to normalize using nkfc there?
+[AI] :Truncated text and missing sentences are common issues when processing complex document layouts, particularly when heuristic layout analysis (like your OpenCV pipeline) makes an error in reading order or fails to correctly merge bounding boxes across page breaks.
+
+Unicode normalization (specifically NFKC) is a distinct issue related to how computers represent and render characters, which is hyper-critical for Bengali text retrieval.
+
+Here is how to address both challenges in your architecture.
+
+---
+
+### 1. Handling Truncated Texts and Missing Sentences
+
+When an OCR pipeline drops sentences or cuts off paragraphs, it is almost always a failure in the **chunking strategy** or the **layout grouping**, not the OCR engine itself.
+
+**A. Implement Semantic Overlap Chunking**
+If your pipeline splits a document purely by character count (e.g., every 500 characters), it will inevitably slice a sentence in half. If the retriever only pulls the first half, the LLM cannot answer the question.
+
+* **The Fix:** Use a chunker that understands sentence boundaries and incorporates an **overlap window**. For example, if Chunk 1 is sentences 1-10, Chunk 2 should be sentences 9-18. This ensures that the transitional context (sentences 9 and 10) is preserved in both vectors.
+* **Implementation:** Use LangChain's `RecursiveCharacterTextSplitter` configured to prioritize punctuation (`.`, `।`, `?`) and set a `chunk_overlap` of 10-15%.
+
+**B. Parent-Child Document Retrieval**
+If a text block is too small (truncated), it lacks the context needed for a good RAG answer.
+
+* **The Fix:** Index highly granular, atomic facts (the "Child" documents) into your vector database. When a user queries a specific fact, the retriever finds that small child chunk. However, instead of passing just the child chunk to the LLM, your system retrieves the entire original page or paragraph (the "Parent" document) and feeds *that* to the LLM.
+* **Why it works:** This guarantees the LLM receives the full, untruncated context surrounding the retrieved fact.
+
+**C. Cross-Column/Cross-Page Merging**
+If your OpenCV heuristic parser forces a left-to-right read across two columns, sentences will be physically broken.
+
+* **The Fix:** You must calculate bounding box intersections. If two text blocks share the same horizontal space (Y-axis overlap) but are separated by a large vertical gap (X-axis distance), they are columns. You must instruct the parser to read Column 1 entirely (top to bottom) before moving to Column 2.
+
+---
+
+### 2. Why NFKC Normalization is Required for Bengali
+
+In Unicode, certain characters can be represented in multiple ways. This is disastrous for vector search because if the document uses Representation A, but the user types their search query using Representation B, the lexical search (BM25) will fail to find a match.
+
+**NFKC** stands for **N**ormalization **F**orm **K**ompatibility **C**omposition. It forces all text into a single, standardized representation.
+
+Here is why it is strictly required for your Bengali corpus:
+
+**A. Combining Characters vs. Precomposed Characters**
+In Bengali, a word like "কি" (ki) can exist in the text in two ways:
+
+1. **Precomposed:** As a single Unicode character for "কি".
+2. **Combining:** As the consonant "ক" (ka) followed by the vowel modifier "ি" (i).
+To a human, they look identical. To a computer, they are completely different strings. NFKC forces both variations into the composed form.
+
+**B. The "Khondota" (ৎ) Problem**
+The character 'ৎ' (Khanda Ta) is often historically encoded as a standard 'ত' (Ta) followed by a Halant/Virama (্). Modern systems use the dedicated 'ৎ' character. If your OCR outputs one form and the user searches with the other, retrieval fails. NFKC standardizes this.
+
+**C. Complex Ligatures (যুক্তবর্ণ)**
+Bengali is heavily reliant on ligatures (e.g., জ্ঞ = জ + ঞ). Different keyboards and OCR engines construct these ligatures differently in Unicode space. NFKC ensures that no matter how the OCR engine constructed the word "বিজ্ঞান" (Science), it will match the user's query perfectly.
+
+**Implementation Note:**
+You must apply NFKC normalization to **both** the ingested OCR text before it enters the database, **and** the user's query before it is sent to the embedding model.
+
+```python
+import unicodedata
+
+def normalize_bengali_text(text):
+    """Applies NFKC normalization to standardise Unicode representation."""
+    return unicodedata.normalize('NFKC', text)
+
+```
+[ME]:show some basic codebases with these design choices with chunking, embedding with a different model that goes with bangla  and also a simple retrival
+[AI]:Here is a complete, modular codebase that implements strict NFKC normalization, semantic chunking tailored for Bengali, and a lightweight vector retrieval system.
+
+Instead of the heavier `BGE-M3` model, this implementation uses `shihab17/bangla-sentence-transformer`. It is a cutting-edge Natural Language Processing (NLP) model specifically fine-tuned for Bengali from `stsb-xlm-r-multilingual`, making it an excellent, lightweight alternative for transforming sentences into high-dimensional embeddings.
+
+### Prerequisites
+
+```bash
+pip install sentence-transformers langchain
+
+```
+
+### The Codebase
+
+```python
+import unicodedata
+import torch
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from sentence_transformers import SentenceTransformer, util
+
+# ==========================================
+# 1. NORMALIZATION
+# ==========================================
+def normalize_bangla(text: str) -> str:
+    """
+    Applies NFKC normalization to ensure complex ligatures, 
+    Khanda Ta (ৎ), and vowel modifiers are uniformly represented.
+    """
+    return unicodedata.normalize('NFKC', text)
+
+# ==========================================
+# 2. CHUNKING STRATEGY
+# ==========================================
+# We configure LangChain to prioritize the Bengali 'দাঁড়ি' (।) 
+# instead of the English period for sentence boundaries.
+bengali_chunker = RecursiveCharacterTextSplitter(
+    separators=["\n\n", "।", "?", "!", "\n", " "],
+    chunk_size=250,      # Smaller chunks are better for dense factual retrieval
+    chunk_overlap=50,    # 20% overlap prevents truncation of context across boundaries
+    length_function=len
+)
+
+# ==========================================
+# 3. EMBEDDING MODEL INITIALIZATION
+# ==========================================
+print("Loading Bangla Sentence Transformer...")
+# This model maps sentences to a dense vector space optimized for Bangla semantic similarity
+model = SentenceTransformer("shihab17/bangla-sentence-transformer")
+
+# ==========================================
+# 4. INGESTION & INDEXING SIMULATION
+# ==========================================
+# Mock OCR output from our previous Humanities textbook example
+raw_ocr_text = """প্রাচীন যুগে বাংলা এখনকার মতো কোনো একক অখণ্ড রাষ্ট্র বা রাজ্য ছিল না। 
+বাংলার বিভিন্ন অংশ তখন ছোট ছোট অঞ্চলে বিভক্ত ছিল। প্রতিটি অঞ্চলের শাসক যার যার মতো শাসন করতেন। 
+বাংলার এই অঞ্চলগুলোকে তখন সমষ্টিগতভাবে নাম দেওয়া হয়েছিল 'জনপদ'। 
+চতুর্থ শতক হতে গুপ্ত যুগ, গুপ্ত পরবর্তী যুগ, পাল, সেন প্রভৃতি আমলের উৎকীর্ণ শিলালিপি ও সাহিত্য গ্রন্থে প্রাচীন বাংলার জনপদগুলোর নাম পাওয়া যায়।"""
+
+print("Normalizing and Chunking text...")
+clean_text = normalize_bangla(raw_ocr_text)
+document_chunks = bengali_chunker.split_text(clean_text)
+
+print(f"Created {len(document_chunks)} chunks.")
+
+# Generate dense vector embeddings for all chunks
+chunk_embeddings = model.encode(document_chunks, convert_to_tensor=True)
+
+# ==========================================
+# 5. RETRIEVAL ENGINE
+# ==========================================
+def retrieve_top_k(query: str, top_k: int = 2):
+    """
+    Embeds the user query and finds the most similar document chunks 
+    using cosine similarity (util.semantic_search).
+    """
+    # CRITICAL: The query must undergo the exact same normalization as the corpus
+    norm_query = normalize_bangla(query)
+    
+    # Embed the query
+    query_embedding = model.encode(norm_query, convert_to_tensor=True)
+    
+    # Compute Cosine Similarity between the query vector and all chunk vectors
+    # util.semantic_search is highly optimized for this operation
+    search_results = util.semantic_search(query_embedding, chunk_embeddings, top_k=top_k)[0]
+    
+    print(f"\n--- Search Results for: '{query}' ---")
+    for hit in search_results:
+        chunk_id = hit['corpus_id']
+        score = hit['score']
+        text = document_chunks[chunk_id]
+        print(f"[Score: {score:.4f}] -> {text.strip()}")
+
+# ==========================================
+# 6. EXECUTION
+# ==========================================
+if __name__ == "__main__":
+    # Test 1: Direct semantic match
+    retrieve_top_k("প্রাচীন বাংলার জনপদগুলোর নাম কোথায় পাওয়া যায়?")
+    
+    # Test 2: Conceptual match (The text mentions "বিভক্ত ছিল", query uses "ভাগ")
+    retrieve_top_k("প্রাচীন যুগে বাংলা কি ভাগে বিভক্ত ছিল?")
+
+```
+
+### Architectural Breakdown
+
+* **Custom Separators:** In the `RecursiveCharacterTextSplitter`, passing `"।"` before `"\n"` guarantees that the text is sliced cleanly at the end of a Bengali sentence rather than indiscriminately splitting a word in half when the `chunk_size` limit is reached.
+* **In-Memory Vector Search:** `util.semantic_search()` uses PyTorch under the hood to calculate the cosine similarity matrix. While enterprise deployments use databases like Qdrant or Milvus, this PyTorch method is perfectly fine for testing on Kaggle or indexing small textbook datasets on the fly.
+* **Symmetric Normalization:** You will notice `normalize_bangla()` is applied to both the ingested textbook and the user's search query. If you only normalize the textbook, user queries containing precomposed ligatures will fail to match.
+
+Are you planning to run this retrieval logic natively inside your Kaggle pipeline alongside the OCR, or will you export the OCR text to an external vector database for querying?
+[ME] : yes
+[AI] : Since your "yes" could mean you are either building an end-to-end testing pipeline on Kaggle or planning to export the data for a production app, I will show you the architectural best practices for both routes.
+
+When you transition from the heavy OCR extraction phase to the Retrieval-Augmented Generation (RAG) phase, memory management becomes your primary bottleneck.
+
+Here is how to handle the architecture depending on your ultimate goal.
+
+## 1. Native Kaggle Execution (The End-to-End Approach)
+
+If your goal is to extract the textbooks, embed them, and immediately run a QA script on Kaggle (perhaps to test the quality of your chunks before deploying anywhere), you should use **FAISS** (Facebook AI Similarity Search).
+
+Using raw PyTorch tensors (like the `util.semantic_search` example) works for a few pages, but it will consume too much RAM once you parse an entire textbook. FAISS creates a highly compressed, optimized index that sits entirely in your system RAM.
+
+* **How it integrates:** After your parallel Qwen3-VL workers finish extracting the Markdown, the main process collects the text, chunks it, embeds it with the `bangla-sentence-transformer`, and pushes the vectors into a FAISS index.
+* **Pros:** Zero external dependencies. You do not need to set up a cloud database or manage API keys.
+* **Cons:** The index is ephemeral. As soon as your Kaggle session restarts, your vector database is deleted.
+
+## 2. Exporting to a Vector Database (The Production Approach)
+
+If you are building an actual application (like a web app for SSC students), Kaggle should strictly be your **Data Preparation Engine**. You use Kaggle's free GPUs to do the heavy lifting of Vision-Language OCR and embedding generation, and then you export the results.
+
+Do not try to spin up a Docker container for Qdrant or ChromaDB inside a Kaggle notebook. It is unstable and prone to crashing.
+
+### The Export Strategy
+
+Instead of connecting directly to a database from Kaggle, serialize your chunks and embeddings into a **Parquet file**.
+
+* **Why Parquet?** It is a columnar storage format that is incredibly efficient for saving high-dimensional vectors (arrays of floats) alongside text metadata.
+* **The Workflow:**
+1. Kaggle extracts text -> Chunks text -> Generates embeddings.
+2. Kaggle saves a file named `nctb_humanities_vectors.parquet`.
+3. You download this file.
+4. Your production backend (running elsewhere) reads the Parquet file and bulk-inserts the vectors into a database like Qdrant, Pinecone, or Supabase in seconds.
+
+
+
+### Data Schema for Export
+
+If you go this route, ensure your exported data structure looks exactly like this before saving:
+
+| chunk_id | doc_title | page_num | text_chunk (NFKC Normalized) | vector_embedding (768D float array) |
+| --- | --- | --- | --- | --- |
+| `hist_ch3_p45_0` | `SSC History` | `45` | `পাল বংশের রাজারা প্রায়...` | `[-0.012, 0.445, -0.991, ...]` |
+
+---
+[ME] : working on making ocr two ssc bangla humanities book, geography and history.make this ocr efficient for such books as there is map , image based text, tables, short caclculation etc.also make lemme know how to tackle this part as per my corpus Section 2 — The structure you exploit (10 points)
 This section asks you to explain why reading these pages is fundamentally a vision problem, made concrete for
 your books. “Structure” means the regular patterns a computer can rely on.
 Structure in the page (what the eye/vision model uses)
@@ -782,7 +1946,7 @@ Since `normalize_embeddings=True` was set during indexing:
 * **Lower is better** (a score closer to `0.0` represents higher semantic similarity / closer match).
 * If you prefer a normalized **Similarity Score (0.0 to 1.0, where higher is better)**, you can replace `similarity_search_with_score` with `vectorstore.similarity_search_with_relevance_scores(query, k=3)`.
 
-[ME] :
+[ME] :on the uploaded final ocr codebase review the final design choice for OCR of the two books
 
 
 [AI] :
@@ -801,6 +1965,25 @@ Since `normalize_embeddings=True` was set during indexing:
 
 
 [AI] :
+
+[ME]:
+[AI]:
+[ME]:
+[AI]:
+[ME]:
+[AI]:
+[ME]:
+[AI]:
+[ME]:
+[AI]:
+[ME]:
+[AI]:
+[ME]:
+[AI]:
+[ME]:
+[AI]:
+[ME]:
+[AI]:
 
 === REFLECTION ===
 Where the AI helped most               : Structuring the 8 design facets and mapping the 9 agent tools to Reads vs. Acts for Section 7.
