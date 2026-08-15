@@ -2,7 +2,7 @@
 Team member name  : Ahtashamul Haque
 Student number    : 2105067
 Project name      : SSC Humanities GK
-Sections I worked on: 
+Sections I worked on: 5,7 partially(3,4)
 
 --- FULL CONVERSATION ---
 [ME]:show me some SOTA methods for ingestions and ehancement,layout,ocr and indexing design coices on rag based ssc humaities books GK preparation
@@ -3248,7 +3248,7 @@ if __name__ == "__main__":
 
 
 === REFLECTION ===
-Where the AI helped most               : Structuring the 8 design facets and mapping the 9 agent tools to Reads vs. Acts for Section 7.
-Where it was wrong / misleading        : It assumed a standard local/server setup without accounting for free GPU limits or live tunneling constraints.
-What I changed or rejected, and why    : Changed deployment to Kaggle with ngrok endpoints to get free T4 GPUs (12h runs) and capped agent budget at 6 steps. considering also azure for fur=ture but initially its just on kaggle
-The one decision I own and can explain : Hosting the backend on Kaggle via ngrok to balance zero compute cost with a live explainable demonstration UI
+Where the AI helped most               : Helped me most in finding the sota models and approaches from web searches. i used to gets some data and search on dofferent ais to get and test some the codebases made by them.
+Where it was wrong / misleading        : for bangla corpus, easyocr got me a good result but it didnt suggenst me so in the forst place also i had to find it from my past experience of a receenta dataset. SOTA model hallucination and inappropriate codebases to be run on free kaggle gpu lead lots of dependency errors
+What I changed or rejected, and why    : rejected other ocrs and used easyocr for a base layer ofocr and then use a qwen 3.5 for critical evaluation of the text from ocr. other rommended ocrs was not that for our corpus. Also the embedding model and reranker choices from llm was quite exploratory and required manual checking and testing
+The one decision I own and can explain : design choices of the qwen model and easyocr running in dual path and thershold based qwen escalation. Also figuring out the ground truth from some enterprise model but not in vas scale 
