@@ -2625,3 +2625,15 @@ You can view the summary of the work here: [walkthrough.md](file:///C:/Users/MUK
 Let me know if there are any other adjustments needed!
 
 
+
+=== REFLECTION ===
+Where the AI helped most    : structuring the pipeline around fixed contracts and a clean layout-vs-OCR split.
+Where it was wrong          : It sometimes assumed a generic local setup and ignored the project’s strict architectural constraints.
+What I changed              : kept the dataclass contracts fixed, used OpenCV-based layout detection, and chose saved OCR reuse with live fallback.
+The one decision I own      : using a hybrid cache-first pipeline for efficient, defensible Bangla textbook OCR.
+
+
+
+
+
+
