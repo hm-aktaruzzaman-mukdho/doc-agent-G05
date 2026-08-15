@@ -2392,12 +2392,406 @@ def run(pages: list[Page], cfg: dict) -> list[Page]:
 
 ```
 
-[ME]:
-[AI]:
-[ME]:
-[AI]:
-[ME]:
-[AI]:
+[ME]:make me a eda.ipynb for corpus exploration,
+
+Explore your scanned corpus: page/word counts, scan quality, script and font variety.
+for the 2 hsc humanities books history and geography to be run on kaggle
+show me cells
+[AI]:Here are the cells to build your `eda.ipynb` notebook on Kaggle for corpus exploration. This notebook will analyze the PDFs directly to extract page counts, estimate word counts, assess the visual quality of the scanned pages (brightness, contrast, and blur/noise), and analyze the font and script variety (Bengali vs. English/Latin).
+
+Copy and paste these blocks into new cells in your Kaggle notebook.
+
+### Cell 1: Markdown
+
+```markdown
+# Corpus Exploration (EDA) for Humanities Textbooks
+**Objective:** Explore the scanned corpus (History and Geography books) to determine page/word counts, assess scan quality, and analyze script and font variety.
+
+```
+
+### Cell 2: Code (Installation)
+
+```python
+# Install necessary libraries (PyMuPDF for fast PDF parsing)
+!pip install -q pymupdf opencv-python-headless matplotlib seaborn pandas tqdm
+
+```
+
+### Cell 3: Code (Imports & Configuration)
+
+```python
+import fitz  # PyMuPDF
+import cv2
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+from tqdm.notebook import tqdm
+import unicodedata
+
+# Set plot style
+sns.set_theme(style="whitegrid")
+
+# Configuration - Update these paths to point to your Kaggle dataset directories
+# Example: /kaggle/input/your-dataset-name/
+DATA_DIR = Path("/kaggle/input") 
+
+# Find the History and Geography PDFs
+pdf_files = list(DATA_DIR.rglob("*.pdf"))
+print(f"Found {len(pdf_files)} PDFs:")
+for p in pdf_files:
+    print(f" - {p.name}")
+
+```
+
+### Cell 4: Markdown
+
+```markdown
+## 1. Corpus Statistics: Page and Word Counts
+We will use PyMuPDF to read the native text layer of the PDFs (if available) to estimate word counts and extract the total number of pages per book.
+
+```
+
+### Cell 5: Code (Page and Word Counts)
+
+```python
+def get_corpus_stats(pdf_paths):
+    stats = []
+    for pdf_path in pdf_paths:
+        try:
+            doc = fitz.open(pdf_path)
+            num_pages = len(doc)
+            total_words = 0
+            
+            for page in doc:
+                text = page.get_text("text")
+                total_words += len(text.split())
+                
+            stats.append({
+                "Book": pdf_path.stem,
+                "Pages": num_pages,
+                "Estimated Words": total_words
+            })
+            doc.close()
+        except Exception as e:
+            print(f"Error processing {pdf_path.name}: {e}")
+            
+    return pd.DataFrame(stats)
+
+df_stats = get_corpus_stats(pdf_files)
+display(df_stats)
+
+# Plotting the statistics
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+sns.barplot(data=df_stats, x="Book", y="Pages", ax=axes[0], palette="viridis")
+axes[0].set_title("Total Pages per Book")
+axes[0].tick_params(axis='x', rotation=45)
+
+sns.barplot(data=df_stats, x="Book", y="Estimated Words", ax=axes[1], palette="magma")
+axes[1].set_title("Estimated Word Count per Book")
+axes[1].tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+plt.show()
+
+```
+
+### Cell 6: Markdown
+
+```markdown
+## 2. Scan Quality Analysis
+To determine if we need aggressive enhancement, we will sample 20 random pages from each book, render them as images, and calculate:
+1. **Brightness:** Mean pixel intensity (0 = Black, 255 = White).
+2. **Contrast:** Root Mean Square (RMS) contrast (standard deviation of pixel intensities).
+3. **Blur / Sharpness:** Variance of the Laplacian (higher means sharper edges, lower means blurry/noisy).
+
+```
+
+### Cell 7: Code (Scan Quality Metrics)
+
+```python
+def analyze_scan_quality(pdf_paths, sample_size=20, dpi=150):
+    quality_data = []
+    
+    for pdf_path in pdf_paths:
+        doc = fitz.open(pdf_path)
+        num_pages = len(doc)
+        
+        # Sample pages evenly across the book
+        sample_pages = np.linspace(0, num_pages - 1, min(sample_size, num_pages), dtype=int)
+        
+        for page_num in tqdm(sample_pages, desc=f"Analyzing {pdf_path.stem[:15]}..."):
+            page = doc[page_num]
+            pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))
+            
+            # Convert to OpenCV grayscale array
+            img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 3:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = img_array
+                
+            # Metrics
+            brightness = np.mean(gray)
+            contrast = np.std(gray)
+            blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            quality_data.append({
+                "Book": pdf_path.stem,
+                "Page": page_num + 1,
+                "Brightness": brightness,
+                "Contrast": contrast,
+                "Sharpness (Laplacian)": blur_score
+            })
+        doc.close()
+        
+    return pd.DataFrame(quality_data)
+
+df_quality = analyze_scan_quality(pdf_files)
+
+# Visualize Distributions
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+sns.kdeplot(data=df_quality, x="Brightness", hue="Book", fill=True, ax=axes[0])
+axes[0].set_title("Brightness Distribution\n(Ideal: Bimodal/High for clean scans)")
+
+sns.kdeplot(data=df_quality, x="Contrast", hue="Book", fill=True, ax=axes[1])
+axes[1].set_title("Contrast Distribution\n(Higher is better for OCR)")
+
+sns.kdeplot(data=df_quality, x="Sharpness (Laplacian)", hue="Book", fill=True, ax=axes[2])
+axes[2].set_title("Sharpness/Blur Distribution\n(Lower = Blurry/Noisy)")
+
+plt.tight_layout()
+plt.show()
+
+```
+
+### Cell 8: Markdown
+
+```markdown
+## 3. Script and Font Variety
+We will extract the embedded font dictionaries to see how many different fonts are used in the PDFs. We will also analyze the extracted text to determine the ratio of Bengali script versus Latin (English) script and digits.
+
+```
+
+### Cell 9: Code (Script & Font Analysis)
+
+```python
+def analyze_fonts_and_scripts(pdf_paths):
+    font_data = []
+    script_data = []
+    
+    for pdf_path in pdf_paths:
+        doc = fitz.open(pdf_path)
+        
+        # 1. Font Variety
+        fonts_used = set()
+        bangla_chars = 0
+        latin_chars = 0
+        other_chars = 0
+        
+        for page_num in range(min(50, len(doc))): # Sample first 50 pages for speed
+            page = doc[page_num]
+            
+            # Extract fonts
+            for font in page.get_fonts():
+                fonts_used.add(font[3]) # Font name is usually at index 3
+                
+            # Extract text for script analysis
+            text = page.get_text("text")
+            for char in text:
+                if char.isspace():
+                    continue
+                cp = ord(char)
+                if 0x0980 <= cp <= 0x09FF:
+                    bangla_chars += 1
+                elif char.isascii() and char.isalnum():
+                    latin_chars += 1
+                else:
+                    other_chars += 1
+                    
+        total_chars = bangla_chars + latin_chars + other_chars
+        if total_chars > 0:
+            script_data.append({
+                "Book": pdf_path.stem,
+                "Bengali %": (bangla_chars / total_chars) * 100,
+                "Latin/English %": (latin_chars / total_chars) * 100,
+                "Punctuation/Other %": (other_chars / total_chars) * 100
+            })
+            
+        font_data.append({
+            "Book": pdf_path.stem,
+            "Unique Fonts": len(fonts_used),
+            "Font Names": ", ".join(list(fonts_used)[:5]) + "..." # Preview first 5
+        })
+        doc.close()
+        
+    return pd.DataFrame(font_data), pd.DataFrame(script_data)
+
+df_fonts, df_scripts = analyze_fonts_and_scripts(pdf_files)
+
+display(df_fonts)
+
+# Plot Script Distribution
+df_scripts.set_index('Book').plot(kind='bar', stacked=True, figsize=(10, 6), colormap="Set2")
+plt.title("Character Script Distribution (Sampled)")
+plt.ylabel("Percentage (%)")
+plt.xticks(rotation=45, ha="right")
+plt.legend(loc='upper right', bbox_to_anchor=(1.25, 1))
+plt.tight_layout()
+plt.show()
+
+```
+[ME]: AssertionError                            Traceback (most recent call last)/tmp/ipykernel_62/1029234207.py in <cell line: 0>()     36     return pd.DataFrame(quality_data)     37 ---> 38 df_quality = analyze_scan_quality(pdf_files)     39      40 # Visualize Distributions/tmp/ipykernel_62/1029234207.py in analyze_scan_quality(pdf_paths, sample_size, dpi)     10      11         for page_num in tqdm(sample_pages, desc=f"Analyzing {pdf_path.stem[:15]}..."):---> 12             page = doc[page_num]     13             pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))     14 /usr/local/lib/python3.12/dist-packages/pymupdf/__init__.py in __getitem__(self, i)   2892         if isinstance(i, slice):   2893             return [self[j] for j in range(*i.indices(len(self)))]-> 2894         assert isinstance(i, int) or (isinstance(i, tuple) and len(i) == 2 and all(isinstance(x, int) for x in i)), \   2895                 f'Invalid item number: {i=}.'   2896         if i not in self:AssertionError: Invalid item number: i=np.int64(0).fix the error
+[AI]:The error occurs because **PyMuPDF (`fitz`) is extremely strict about the data type of the page index**.
+
+The `np.linspace` function generates an array of Numpy integers (`np.int64`). When you pass `np.int64(0)` into `doc[page_num]`, PyMuPDF crashes because it strictly expects a standard Python `int`.
+
+Here is the corrected **Cell 7** code. I have added a simple `int(page_num)` cast to fix the assertion error.
+
+### Corrected Cell 7: Code (Scan Quality Metrics)
+
+```python
+def analyze_scan_quality(pdf_paths, sample_size=20, dpi=150):
+    quality_data = []
+    
+    for pdf_path in pdf_paths:
+        doc = fitz.open(pdf_path)
+        num_pages = len(doc)
+        
+        # Sample pages evenly across the book
+        sample_pages = np.linspace(0, num_pages - 1, min(sample_size, num_pages), dtype=int)
+        
+        for page_num in tqdm(sample_pages, desc=f"Analyzing {pdf_path.stem[:15]}..."):
+            # FIX: Cast np.int64 to standard Python int for PyMuPDF
+            page = doc[int(page_num)] 
+            
+            pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72))
+            
+            # Convert to OpenCV grayscale array
+            img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 3:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = img_array
+                
+            # Metrics
+            brightness = np.mean(gray)
+            contrast = np.std(gray)
+            blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            quality_data.append({
+                "Book": pdf_path.stem,
+                "Page": int(page_num) + 1,
+                "Brightness": brightness,
+                "Contrast": contrast,
+                "Sharpness (Laplacian)": blur_score
+            })
+        doc.close()
+        
+    return pd.DataFrame(quality_data)
+
+df_quality = analyze_scan_quality(pdf_files)
+
+# Visualize Distributions
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+sns.kdeplot(data=df_quality, x="Brightness", hue="Book", fill=True, ax=axes[0])
+axes[0].set_title("Brightness Distribution\n(Ideal: Bimodal/High for clean scans)")
+
+sns.kdeplot(data=df_quality, x="Contrast", hue="Book", fill=True, ax=axes[1])
+axes[1].set_title("Contrast Distribution\n(Higher is better for OCR)")
+
+sns.kdeplot(data=df_quality, x="Sharpness (Laplacian)", hue="Book", fill=True, ax=axes[2])
+axes[2].set_title("Sharpness/Blur Distribution\n(Lower = Blurry/Noisy)")
+
+plt.tight_layout()
+plt.show()
+
+```
+[ME]:KeyError                                  Traceback (most recent call last)/tmp/ipykernel_62/3738598015.py in <cell line: 0>()     55      56 # Plot Script Distribution---> 57 df_scripts.set_index('Book').plot(kind='bar', stacked=True, figsize=(10, 6), colormap="Set2")     58 plt.title("Character Script Distribution (Sampled)")     59 plt.ylabel("Percentage (%)")/usr/local/lib/python3.12/dist-packages/pandas/core/frame.py in set_index(self, keys, drop, append, inplace, verify_integrity)   6142    6143         if missing:-> 6144             raise KeyError(f"None of {missing} are in the columns")   6145    6146         if inplace:KeyError: "None of ['Book'] are in the columns"
+[AI]:The `KeyError: "None of ['Book'] are in the columns"` happens when `df_scripts` is completely empty.
+
+This typically occurs when PyMuPDF's `page.get_text("text")` extracts zero text from the PDF. In scanned textbooks, the pages are just images, meaning there is no underlying embedded digital text layer for PyMuPDF to extract. Since `total_chars` remains 0, the script data is never appended to the list, resulting in an empty DataFrame.
+
+Here is the corrected **Cell 9**. I have added a robust check to see if the DataFrames are empty before attempting to plot them. If the books are purely scanned images with no OCR layer, this cell will clearly print that out instead of crashing.
+
+### Corrected Cell 9: Code (Script & Font Analysis)
+
+```python
+def analyze_fonts_and_scripts(pdf_paths):
+    font_data = []
+    script_data = []
+    
+    for pdf_path in pdf_paths:
+        doc = fitz.open(pdf_path)
+        
+        # 1. Font Variety
+        fonts_used = set()
+        bangla_chars = 0
+        latin_chars = 0
+        other_chars = 0
+        
+        for page_num in range(min(50, len(doc))): # Sample first 50 pages for speed
+            page = doc[page_num]
+            
+            # Extract fonts
+            for font in page.get_fonts():
+                fonts_used.add(font[3]) # Font name is usually at index 3
+                
+            # Extract text for script analysis
+            text = page.get_text("text")
+            for char in text:
+                if char.isspace():
+                    continue
+                cp = ord(char)
+                if 0x0980 <= cp <= 0x09FF:
+                    bangla_chars += 1
+                elif char.isascii() and char.isalnum():
+                    latin_chars += 1
+                else:
+                    other_chars += 1
+                    
+        total_chars = bangla_chars + latin_chars + other_chars
+        if total_chars > 0:
+            script_data.append({
+                "Book": pdf_path.stem,
+                "Bengali %": (bangla_chars / total_chars) * 100,
+                "Latin/English %": (latin_chars / total_chars) * 100,
+                "Punctuation/Other %": (other_chars / total_chars) * 100
+            })
+            
+        font_data.append({
+            "Book": pdf_path.stem,
+            "Unique Fonts": len(fonts_used),
+            "Font Names": ", ".join(list(fonts_used)[:5]) + "..." if fonts_used else "None"
+        })
+        doc.close()
+        
+    return pd.DataFrame(font_data), pd.DataFrame(script_data)
+
+df_fonts, df_scripts = analyze_fonts_and_scripts(pdf_files)
+
+print("--- Font Analysis ---")
+display(df_fonts)
+
+print("\n--- Script Analysis ---")
+if df_scripts.empty:
+    print("WARNING: df_scripts is empty. This means PyMuPDF could not find any native text in the first 50 pages.")
+    print("These PDFs are likely raw scanned images with no embedded OCR layer.")
+else:
+    display(df_scripts)
+    # Plot Script Distribution
+    df_scripts.set_index('Book').plot(kind='bar', stacked=True, figsize=(10, 6), colormap="Set2")
+    plt.title("Character Script Distribution (Sampled from Native Text Layer)")
+    plt.ylabel("Percentage (%)")
+    plt.xticks(rotation=45, ha="right")
+    plt.legend(loc='upper right', bbox_to_anchor=(1.25, 1))
+    plt.tight_layout()
+    plt.show()
+
+```
 [ME]:
 [AI]:
 [ME]:
