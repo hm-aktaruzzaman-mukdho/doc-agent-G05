@@ -1,5 +1,7 @@
 """Stage 4 — vector store"""
+
 from __future__ import annotations
+
 import json
 import re
 from datetime import UTC, datetime
@@ -7,9 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import faiss
-import numpy as np
-
-from ..contracts import Chunk 
 import numpy as np
 
 from ..contracts import Chunk
@@ -41,6 +40,7 @@ def _record(chunk: Chunk, chunk_id: int) -> dict[str, Any]:
         "token_count": len(chunk.text.split()),
         "source": chunk.doc_id,
     }
+
 
 def build(chunks, vectors, cfg: dict) -> None:
     """Persist a vector index (cfg['index']['type']). IMPLEMENT."""

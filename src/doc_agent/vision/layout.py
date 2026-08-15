@@ -42,7 +42,7 @@ def _merge_boxes(
     merged: list[list[int]] = []
     for box in sorted(boxes, key=lambda item: (item[1], item[0])):
         for current in merged:
-            current_tuple = tuple(current)
+            current_tuple = (current[0], current[1], current[2], current[3])
             if _overlap_fraction(box, current_tuple) > threshold:
                 current[0] = min(current[0], box[0])
                 current[1] = min(current[1], box[1])
@@ -51,7 +51,7 @@ def _merge_boxes(
                 break
         else:
             merged.append(list(box))
-    return [tuple(box) for box in merged]
+    return [(box[0], box[1], box[2], box[3]) for box in merged]
 
 
 def _table_boxes(image: np.ndarray, cfg: dict) -> list[tuple[int, int, int, int]]:

@@ -102,7 +102,9 @@ class Retriever:
                 else []
             )
             self._add_rrf(fusion_scores, lexical_ranked)
-        fused_ids = sorted(fusion_scores, key=fusion_scores.get, reverse=True)[:candidate_k]
+        fused_ids = sorted(
+            fusion_scores, key=lambda chunk_id: fusion_scores[chunk_id], reverse=True
+        )[:candidate_k]
 
         candidates: list[Chunk] = []
         for index in fused_ids:
